@@ -2,6 +2,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("@lib/prisma", () => ({
   prisma: {
+    branch: {
+      findUnique: vi.fn(),
+    },
     stockMovement: {
       create: vi.fn(),
       findMany: vi.fn(),
@@ -9,6 +12,8 @@ vi.mock("@lib/prisma", () => ({
       aggregate: vi.fn(),
       groupBy: vi.fn(),
     },
+    $transaction: vi.fn(),
+    $queryRaw: vi.fn(),
   },
 }));
 
@@ -31,6 +36,10 @@ const mockedInvalidateStockCache = vi.mocked(invalidateStockCache);
 describe("Inventory Service", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(mockedPrisma.$transaction).mockImplementation(async (callback) => {
+      return callback(mockedPrisma);
+    });
+    vi.mocked(mockedPrisma.branch.findUnique).mockResolvedValue({ id: "branch-1", tenantId: "tenant-1" });
   });
 
   describe("createStockMovement", () => {
@@ -57,11 +66,11 @@ describe("Inventory Service", () => {
       });
 
       expect(result.quantity).toBe(10);
-      expect(mockedInvalidateStockCache).toHaveBeenCalledWith("prod-1", "branch-1", null);
+      expect(mockedInvalidateStockCache).toHaveBeenCalledWith("prod-1", "branch-1", undefined, "tenant-1");
     });
 
     it("creates OUTBOUND movement with negative quantity", async () => {
-      vi.mocked(mockedPrisma.stockMovement.aggregate).mockResolvedValue({ _sum: { quantity: 100 } });
+      vi.mocked(mockedPrisma.$queryRaw).mockResolvedValue([{ total: BigInt(100) }]);
       vi.mocked(mockedPrisma.stockMovement.create).mockResolvedValue({
         id: "mov-2",
         type: "OUTBOUND",
@@ -84,12 +93,7 @@ describe("Inventory Service", () => {
       });
 
       expect(result.quantity).toBe(-5);
-      expect(mockedInvalidateStockCache).toHaveBeenCalledWith("prod-1", "branch-1", null);
-      const aggregateCall = vi.mocked(mockedPrisma.stockMovement.aggregate).mock.calls[0];
-      const createCall = vi.mocked(mockedPrisma.stockMovement.create).mock.calls[0];
-      expect(mockedPrisma.stockMovement.aggregate).toHaveBeenCalled();
-      expect(mockedPrisma.stockMovement.create).toHaveBeenCalled();
-      expect(aggregateCall[0]).toBeLessThan(createCall[0]?.createdAt?.getTime() ?? 0);
+      expect(mockedInvalidateStockCache).toHaveBeenCalledWith("prod-1", "branch-1", undefined, "tenant-1");
     });
 
     it("throws for zero or negative quantity", async () => {
@@ -105,7 +109,7 @@ describe("Inventory Service", () => {
     });
 
     it("throws for OUTBOUND when insufficient stock", async () => {
-      vi.mocked(mockedPrisma.stockMovement.aggregate).mockResolvedValue({ _sum: { quantity: 3 } });
+      vi.mocked(mockedPrisma.$queryRaw).mockResolvedValue([{ total: BigInt(3) }]);
 
       await expect(
         createStockMovement({
@@ -119,7 +123,7 @@ describe("Inventory Service", () => {
     });
 
     it("allows OUTBOUND when stock is sufficient", async () => {
-      vi.mocked(mockedPrisma.stockMovement.aggregate).mockResolvedValue({ _sum: { quantity: 10 } });
+      vi.mocked(mockedPrisma.$queryRaw).mockResolvedValue([{ total: BigInt(10) }]);
       vi.mocked(mockedPrisma.stockMovement.create).mockResolvedValue({
         id: "mov-3",
         type: "OUTBOUND",
@@ -142,7 +146,7 @@ describe("Inventory Service", () => {
       });
 
       expect(result.quantity).toBe(-5);
-      expect(mockedInvalidateStockCache).toHaveBeenCalledWith("prod-1", "branch-1", null);
+      expect(mockedInvalidateStockCache).toHaveBeenCalledWith("prod-1", "branch-1", undefined, "tenant-1");
     });
 
     it("invalidates cache with variantId when provided", async () => {
@@ -168,7 +172,7 @@ describe("Inventory Service", () => {
         quantity: 10,
       });
 
-      expect(mockedInvalidateStockCache).toHaveBeenCalledWith("prod-1", "branch-1", "var-1");
+      expect(mockedInvalidateStockCache).toHaveBeenCalledWith("prod-1", "branch-1", "var-1", "tenant-1");
     });
   });
 
@@ -218,8 +222,24 @@ describe("Inventory Service", () => {
 
   describe("listStockMovements", () => {
     it("filters by branch and product", async () => {
-      vi.mocked(mockedPrisma.stockMovement.findMany).mockResolvedValue([]);
-      vi.mocked(mockedPrisma.stockMovement.count).mockResolvedValue(0);
+      vi.mocked(mockedPrisma.stockMovement.findMany).mockResolvedValue([
+        {
+          id: "mov-1",
+          type: "INBOUND" as const,
+          quantity: 10,
+          tenantId: "tenant-1",
+          branchId: "branch-1",
+          productId: "prod-1",
+          variantId: null,
+          reason: null,
+          referenceId: null,
+          createdAt: new Date(),
+          branch: { id: "branch-1", name: "Branch 1", tenantId: "tenant-1" },
+          product: { id: "prod-1", name: "Product 1" },
+          variant: null,
+        },
+      ]);
+      vi.mocked(mockedPrisma.stockMovement.count).mockResolvedValue(1);
 
       await listStockMovements({
         tenantId: "tenant-1",

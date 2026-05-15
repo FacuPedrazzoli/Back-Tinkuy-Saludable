@@ -24,17 +24,16 @@ function isTenantModel(model: string): boolean {
   return TENANT_MODELS.includes(model);
 }
 
-/**
- * Recursively inject tenantId into WHERE clauses for tenant-scoped models.
- */
-function injectTenantFilter(args: any, tenantId: string): any {
+type PrismaArgs = Record<string, unknown>;
+
+function injectTenantFilter(args: PrismaArgs | null, tenantId: string): PrismaArgs | null {
   if (!args || typeof args !== "object") return args;
 
   if (Array.isArray(args)) {
-    return args.map((item) => injectTenantFilter(item, tenantId));
+    return args.map((item) => injectTenantFilter(item as PrismaArgs, tenantId)) as PrismaArgs;
   }
 
-  const result: any = {};
+  const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(args)) {
     if (key === "where" && value && typeof value === "object") {
       result[key] = { ...injectTenantFilter(value, tenantId), tenantId };
@@ -47,7 +46,7 @@ function injectTenantFilter(args: any, tenantId: string): any {
   return result;
 }
 
-const databaseUrl = process.env.DATABASE_URL ?? "";
+const databaseUrl = process.env.DATABASE_URL;
 const prismaOptions: ConstructorParameters<typeof PrismaClient>[0] = {
   log:
     process.env.NODE_ENV === "development"
@@ -55,11 +54,14 @@ const prismaOptions: ConstructorParameters<typeof PrismaClient>[0] = {
       : ["error"],
 };
 
+const DB_CONNECTION_LIMIT = parseInt(process.env.DB_CONNECTION_LIMIT ?? "10", 10);
+const DB_POOL_TIMEOUT = parseInt(process.env.DB_POOL_TIMEOUT ?? "20", 10);
+
 if (databaseUrl && !databaseUrl.includes("connection_limit")) {
   const separator = databaseUrl.includes("?") ? "&" : "?";
   prismaOptions.datasources = {
     db: {
-      url: `${databaseUrl}${separator}connection_limit=10&pool_timeout=20`,
+      url: `${databaseUrl}${separator}connection_limit=${DB_CONNECTION_LIMIT}&pool_timeout=${DB_POOL_TIMEOUT}`,
     },
   };
 }

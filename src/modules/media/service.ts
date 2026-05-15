@@ -1,5 +1,5 @@
 import { prisma } from "@lib/prisma";
-import { ValidationError } from "@lib/errors";
+import { ValidationError, NotFoundError, ForbiddenError } from "@lib/errors";
 
 function isValidImageUrl(url: string): boolean {
   try {
@@ -10,7 +10,22 @@ function isValidImageUrl(url: string): boolean {
   }
 }
 
+async function getImageWithTenantCheck(id: string, tenantId: string) {
+  const image = await prisma.productImage.findUnique({
+    where: { id },
+    include: { product: { select: { tenantId: true } }, variant: { select: { product: { select: { tenantId: true } } } } },
+  });
+  if (!image) throw new NotFoundError("Image");
+
+  const imageTenantId = image.product?.tenantId ?? image.variant?.product?.tenantId;
+  if (imageTenantId && imageTenantId !== tenantId) {
+    throw new ForbiddenError("Image does not belong to this tenant");
+  }
+  return image;
+}
+
 export async function createImage(input: {
+  tenantId: string;
   productId?: string;
   variantId?: string;
   url: string;
@@ -18,11 +33,30 @@ export async function createImage(input: {
   sortOrder?: number;
 }) {
   if (!input.productId && !input.variantId) {
-    throw new Error("Either productId or variantId is required");
+    throw new ValidationError("Either productId or variantId is required");
   }
   if (!isValidImageUrl(input.url)) {
     throw new ValidationError("Image URL must use HTTP or HTTPS protocol");
   }
+
+  if (input.productId) {
+    const product = await prisma.product.findUnique({
+      where: { id: input.productId },
+      select: { tenantId: true },
+    });
+    if (!product) throw new NotFoundError("Product");
+    if (product.tenantId !== input.tenantId) throw new ForbiddenError("Product does not belong to this tenant");
+  }
+
+  if (input.variantId) {
+    const variant = await prisma.productVariant.findUnique({
+      where: { id: input.variantId },
+      include: { product: { select: { tenantId: true } } },
+    });
+    if (!variant) throw new NotFoundError("Variant");
+    if (variant.product.tenantId !== input.tenantId) throw new ForbiddenError("Variant does not belong to this tenant");
+  }
+
   return prisma.productImage.create({
     data: {
       productId: input.productId,
@@ -36,18 +70,21 @@ export async function createImage(input: {
 
 export async function updateImage(
   id: string,
-  input: { url?: string; altText?: string | null; sortOrder?: number }
+  input: { url?: string; altText?: string | null; sortOrder?: number },
+  tenantId: string
 ) {
   if (input.url !== undefined && !isValidImageUrl(input.url)) {
     throw new ValidationError("Image URL must use HTTP or HTTPS protocol");
   }
+  await getImageWithTenantCheck(id, tenantId);
   return prisma.productImage.update({
     where: { id },
     data: input,
   });
 }
 
-export async function deleteImage(id: string) {
+export async function deleteImage(id: string, tenantId: string) {
+  await getImageWithTenantCheck(id, tenantId);
   return prisma.productImage.delete({ where: { id } });
 }
 

@@ -4,18 +4,20 @@ vi.mock("@lib/prisma", () => ({
   prisma: {
     product: {
       findUnique: vi.fn(),
+      findFirst: vi.fn(),
       findMany: vi.fn(),
       count: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
     },
     productVariant: {
+      findUnique: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
     },
-    tag: { create: vi.fn(), findMany: vi.fn() },
-    supplier: { create: vi.fn(), findMany: vi.fn() },
-    productAttribute: { create: vi.fn() },
+    tag: { create: vi.fn(), findMany: vi.fn(), update: vi.fn(), delete: vi.fn() },
+    supplier: { create: vi.fn(), findMany: vi.fn(), update: vi.fn(), delete: vi.fn() },
+    productAttribute: { create: vi.fn(), delete: vi.fn() },
   },
 }));
 

@@ -1,6 +1,7 @@
 import { builder } from "@graphql/builder";
 import * as authService from "./service";
 import { rateLimitAuth } from "@lib/rate-limit";
+import { AuthenticationError } from "@lib/errors";
 
 // ─── Types ───
 
@@ -74,35 +75,35 @@ const AdminAuthResult = builder.objectRef<AdminAuthResultShape>("AdminAuthResult
 
 const AdminLoginInput = builder.inputType("AdminLoginInput", {
   fields: (t) => ({
-    email: t.string({ required: true }),
-    password: t.string({ required: true }),
-    tenantId: t.string({ required: true }),
+    email: t.string({ required: true, minLength: 1, maxLength: 255 }),
+    password: t.string({ required: true, minLength: 1 }),
+    tenantId: t.string({ required: true, minLength: 1, maxLength: 64 }),
   }),
 });
 
 const CustomerLoginInput = builder.inputType("CustomerLoginInput", {
   fields: (t) => ({
-    email: t.string({ required: true }),
-    password: t.string({ required: true }),
-    tenantId: t.string({ required: true }),
+    email: t.string({ required: true, minLength: 1, maxLength: 255 }),
+    password: t.string({ required: true, minLength: 1 }),
+    tenantId: t.string({ required: true, minLength: 1, maxLength: 64 }),
   }),
 });
 
 const CustomerRegisterInput = builder.inputType("CustomerRegisterInput", {
   fields: (t) => ({
-    email: t.string({ required: true }),
-    password: t.string({ required: true }),
-    firstName: t.string({ required: true }),
-    lastName: t.string({ required: true }),
-    phone: t.string(),
-    tenantId: t.string({ required: true }),
+    email: t.string({ required: true, minLength: 1, maxLength: 255 }),
+    password: t.string({ required: true, minLength: 8, maxLength: 128 }),
+    firstName: t.string({ required: true, minLength: 1, maxLength: 100 }),
+    lastName: t.string({ required: true, minLength: 1, maxLength: 100 }),
+    phone: t.string({ maxLength: 20 }),
+    tenantId: t.string({ required: true, minLength: 1, maxLength: 64 }),
   }),
 });
 
 const ChangePasswordInput = builder.inputType("ChangePasswordInput", {
   fields: (t) => ({
-    oldPassword: t.string({ required: true }),
-    newPassword: t.string({ required: true }),
+    oldPassword: t.string({ required: true, minLength: 1 }),
+    newPassword: t.string({ required: true, minLength: 8, maxLength: 128 }),
   }),
 });
 
@@ -184,7 +185,8 @@ builder.mutationField("changePassword", (t) =>
     authScopes: { authenticated: true },
     args: { input: t.arg({ type: ChangePasswordInput, required: true }) },
     resolve: async (_parent, { input }, ctx) => {
-      if (!ctx.user) throw new Error("Unauthorized");
+      if (!ctx.user) throw new AuthenticationError("Unauthorized");
+      await rateLimitAuth(`changepw:${ctx.user.id}`);
       return authService.changePassword(
         ctx.user.id,
         ctx.user.role,

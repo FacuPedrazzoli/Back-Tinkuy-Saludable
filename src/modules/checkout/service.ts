@@ -2,6 +2,7 @@ import { ValidationError } from "@lib/errors";
 import { createPreference, type CartItemForCheckout } from "@lib/mercadopago";
 import { getGuestCart, getUserCart, validateCartStock, storeValidatedCartSnapshot } from "@modules/cart/service";
 import { prisma } from "@lib/prisma";
+import { sanitizeString } from "@lib/validation";
 
 export async function createCheckout(input: {
   cartId: string;
@@ -14,8 +15,8 @@ export async function createCheckout(input: {
   isUserCart?: boolean;
 }) {
   const cart = input.isUserCart
-    ? await getUserCart(input.cartId)
-    : await getGuestCart(input.cartId);
+    ? await getUserCart(input.cartId, input.tenantId)
+    : await getGuestCart(input.cartId, input.tenantId);
 
   if (cart.items.length === 0) {
     throw new ValidationError("Cart is empty");
@@ -50,14 +51,17 @@ export async function createCheckout(input: {
     }
     const itemPriceNum = Number(item.price);
     const expectedPriceNum = Number(expectedPrice);
+    if (Number.isNaN(itemPriceNum) || Number.isNaN(expectedPriceNum)) {
+      throw new ValidationError(`Invalid price for ${sanitizeString(item.name)}`);
+    }
     if (Math.abs(itemPriceNum - expectedPriceNum) > 0.01) {
       throw new ValidationError(
-        `Price mismatch for ${item.name}: cart has ${itemPriceNum}, expected ${expectedPriceNum}`
+        `Price mismatch for ${sanitizeString(item.name)}: cart has ${itemPriceNum}, expected ${expectedPriceNum}`
       );
     }
   }
 
-  const stockCheck = await validateCartStock(cart, input.branchId);
+  const stockCheck = await validateCartStock(cart, input.branchId, input.tenantId);
   if (!stockCheck.valid) {
     throw new ValidationError(stockCheck.errors.join("; "));
   }
@@ -89,12 +93,16 @@ export async function createCheckout(input: {
       : undefined,
   });
 
-  await storeValidatedCartSnapshot(cart, input.tenantId, input.branchId, preference.id ?? "");
+  if (!preference.id) {
+    throw new ValidationError("Failed to create MercadoPago preference");
+  }
+
+  await storeValidatedCartSnapshot(cart, input.tenantId, input.branchId, preference.id);
 
   return {
     preferenceId: preference.id,
-    initPoint: preference.init_point,
-    sandboxInitPoint: preference.sandbox_init_point,
+    initPoint: preference.init_point ?? null,
+    sandboxInitPoint: preference.sandbox_init_point ?? null,
     totalAmount,
   };
 }

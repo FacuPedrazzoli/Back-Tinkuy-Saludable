@@ -1,7 +1,8 @@
 import { prisma } from "@lib/prisma";
-import { NotFoundError, ValidationError } from "@lib/errors";
+import { NotFoundError, ValidationError, ForbiddenError } from "@lib/errors";
 import { sanitizeSlug, sanitizeString } from "@lib/validation";
-import { getStockCached } from "@lib/cache";
+import { getStockCached, getBatchStockCached, type BatchStockKey } from "@lib/cache";
+import { queryCache, PRODUCT_CACHE_TTL } from "@lib/query-cache";
 import { Prisma } from "@prisma/client";
 
 interface ProductCreateInput {
@@ -69,6 +70,10 @@ export async function createProduct(input: ProductCreateInput) {
 }
 
 export async function getProduct(id: string, tenantId: string, activeOnly = false) {
+  const cacheKey = `product:${id}:${tenantId}:${activeOnly}`;
+  const cached = await queryCache.get<NonNullable<ReturnType<typeof prisma.product.findUnique>>>(cacheKey);
+  if (cached) return cached;
+
   const where: Prisma.ProductWhereUniqueInput = { id, tenantId };
   if (activeOnly) {
     where.isActive = true;
@@ -85,6 +90,8 @@ export async function getProduct(id: string, tenantId: string, activeOnly = fals
     },
   });
   if (!product) throw new NotFoundError("Product");
+
+  await queryCache.set(cacheKey, product, { ttlSeconds: PRODUCT_CACHE_TTL });
   return product;
 }
 
@@ -106,11 +113,18 @@ export async function listProducts(args: {
     where.tags = { some: { tag: { slug: args.tagSlug } } };
   }
 
+  const take = Math.min(args.take ?? 20, 100);
+  const skip = args.skip ?? 0;
+
+  const cacheKey = `products:list:${args.tenantId}:${JSON.stringify(where)}:${take}:${skip}`;
+  const cached = await queryCache.get<{ items: NonNullable<ReturnType<typeof prisma.product.findMany>>; count: number }>(cacheKey);
+  if (cached) return cached;
+
   const [items, count] = await Promise.all([
     prisma.product.findMany({
       where,
-      take: args.take ?? 20,
-      skip: args.skip ?? 0,
+      take,
+      skip,
       orderBy: { createdAt: "desc" },
       include: {
         variants: true,
@@ -121,12 +135,15 @@ export async function listProducts(args: {
     prisma.product.count({ where }),
   ]);
 
-  return { items, count };
+  const result = { items, count };
+  await queryCache.set(cacheKey, result, { ttlSeconds: PRODUCT_CACHE_TTL });
+  return result;
 }
 
 export async function updateProduct(
   id: string,
   input: {
+    tenantId: string;
     name?: string;
     slug?: string;
     description?: string | null;
@@ -137,7 +154,15 @@ export async function updateProduct(
     tagIds?: string[];
   }
 ) {
+  const product = await prisma.product.findUnique({
+    where: { id },
+    select: { tenantId: true },
+  });
+  if (!product) throw new NotFoundError("Product");
+  if (product.tenantId !== input.tenantId) throw new ForbiddenError("Product does not belong to this tenant");
+
   const data: Prisma.ProductUpdateInput = { ...input };
+  delete (data as Record<string, unknown>).tenantId;
   if (input.slug) data.slug = sanitizeSlug(input.slug);
   if (input.description !== undefined) data.description = sanitizeString(input.description);
 
@@ -155,8 +180,13 @@ export async function updateProduct(
   });
 }
 
-export async function deleteProduct(id: string) {
-  // Soft delete: mark invisible and inactive
+export async function deleteProduct(id: string, tenantId: string) {
+  const product = await prisma.product.findUnique({
+    where: { id },
+    select: { tenantId: true },
+  });
+  if (!product) throw new NotFoundError("Product");
+  if (product.tenantId !== tenantId) throw new ForbiddenError("Product does not belong to this tenant");
   return prisma.product.update({
     where: { id },
     data: { isActive: false, isVisible: false },
@@ -170,7 +200,14 @@ export async function createVariant(input: {
   sku: string;
   name: string;
   price: number;
-}) {
+}, tenantId: string) {
+  const product = await prisma.product.findUnique({
+    where: { id: input.productId },
+    select: { tenantId: true },
+  });
+  if (!product) throw new NotFoundError("Product");
+  if (product.tenantId !== tenantId) throw new ForbiddenError("Product does not belong to this tenant");
+
   return prisma.productVariant.create({
     data: {
       productId: input.productId,
@@ -184,8 +221,16 @@ export async function createVariant(input: {
 
 export async function updateVariant(
   id: string,
-  input: { sku?: string; name?: string; price?: number; isActive?: boolean }
+  input: { sku?: string; name?: string; price?: number; isActive?: boolean },
+  tenantId: string
 ) {
+  const variant = await prisma.productVariant.findUnique({
+    where: { id },
+    include: { product: true },
+  });
+  if (!variant) throw new NotFoundError("Variant");
+  if (variant.product.tenantId !== tenantId) throw new ForbiddenError("Variant does not belong to this tenant");
+
   return prisma.productVariant.update({
     where: { id },
     data: input,
@@ -193,7 +238,14 @@ export async function updateVariant(
   });
 }
 
-export async function deleteVariant(id: string) {
+export async function deleteVariant(id: string, tenantId: string) {
+  const variant = await prisma.productVariant.findUnique({
+    where: { id },
+    include: { product: true },
+  });
+  if (!variant) throw new NotFoundError("Variant");
+  if (variant.product.tenantId !== tenantId) throw new ForbiddenError("Variant does not belong to this tenant");
+
   return prisma.productVariant.update({
     where: { id },
     data: { isActive: false },
@@ -209,9 +261,12 @@ export async function createTag(input: { tenantId: string; name: string; slug?: 
   });
 }
 
-export async function listTags(tenantId: string) {
+export async function listTags(tenantId: string, args: { take?: number; skip?: number } = {}) {
+  const take = Math.min(args.take ?? 100, 100);
   return prisma.tag.findMany({
     where: { tenantId },
+    take,
+    skip: args.skip ?? 0,
     orderBy: { name: "asc" },
     include: { _count: { select: { products: true } } },
   });
@@ -247,9 +302,11 @@ export async function createSupplier(input: {
   });
 }
 
-export async function listSuppliers(tenantId: string) {
+export async function listSuppliers(tenantId: string, args: { take?: number; skip?: number } = {}) {
   return prisma.supplier.findMany({
     where: { tenantId },
+    take: args.take ?? 100,
+    skip: args.skip ?? 0,
     orderBy: { name: "asc" },
   });
 }
@@ -268,6 +325,7 @@ export async function deleteSupplier(id: string) {
 // ─── Attributes ───
 
 export async function createAttribute(input: {
+  tenantId: string;
   productId?: string;
   variantId?: string;
   key: string;
@@ -276,6 +334,25 @@ export async function createAttribute(input: {
   if (!input.productId && !input.variantId) {
     throw new ValidationError("Either productId or variantId is required");
   }
+
+  if (input.productId) {
+    const product = await prisma.product.findUnique({
+      where: { id: input.productId },
+      select: { tenantId: true },
+    });
+    if (!product) throw new NotFoundError("Product");
+    if (product.tenantId !== input.tenantId) throw new ForbiddenError("Product does not belong to this tenant");
+  }
+
+  if (input.variantId) {
+    const variant = await prisma.productVariant.findUnique({
+      where: { id: input.variantId },
+      include: { product: { select: { tenantId: true } } },
+    });
+    if (!variant) throw new NotFoundError("Variant");
+    if (variant.product.tenantId !== input.tenantId) throw new ForbiddenError("Variant does not belong to this tenant");
+  }
+
   return prisma.productAttribute.create({
     data: {
       productId: input.productId,
@@ -300,4 +377,15 @@ export async function getProductStock(productId: string, branchId: string) {
 export async function getVariantStock(variantId: string, branchId: string) {
   const result = await getStockCached(variantId, branchId, variantId);
   return result.found ? result.value : null;
+}
+
+export async function getBatchProductStock(
+  items: { productId: string; branchId: string }[]
+): Promise<(number | null)[]> {
+  if (items.length === 0) return [];
+  const keys: BatchStockKey[] = items.map((item) => ({
+    productId: item.productId,
+    branchId: item.branchId,
+  }));
+  return getBatchStockCached(keys);
 }

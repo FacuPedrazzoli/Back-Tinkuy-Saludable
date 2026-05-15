@@ -1,17 +1,15 @@
 import { MercadoPagoConfig, Preference } from "mercadopago";
-
-const accessToken = process.env.MP_ACCESS_TOKEN ?? "";
-if (!accessToken) {
-  throw new Error("MP_ACCESS_TOKEN environment variable is required");
-}
+import { config } from "./config";
+import { mpCircuitBreaker } from "./circuit-breaker";
+import { logger } from "./logger";
 
 const mpConfig = new MercadoPagoConfig({
-  accessToken,
+  accessToken: config.mercadoPago.accessToken,
 });
 
 export const preferenceClient = new Preference(mpConfig);
 
-const MP_MODE = process.env.MP_MODE ?? "test";
+const MP_MODE = config.mercadoPago.mode;
 
 export interface CartItemForCheckout {
   id: string;
@@ -25,6 +23,10 @@ export interface PreferenceResponse {
   id: string;
   init_point: string;
   sandbox_init_point: string;
+}
+
+function isMercadoPagoConfigured(): boolean {
+  return !!config.mercadoPago.accessToken && config.mercadoPago.accessToken.length > 0;
 }
 
 export async function createPreference(input: {
@@ -42,7 +44,7 @@ export async function createPreference(input: {
     surname?: string;
   };
 }) {
-  const isTestMode = MP_MODE === "test" || !accessToken;
+  const isTestMode = MP_MODE === "test" || !isMercadoPagoConfigured();
   if (isTestMode) {
     return {
       id: `mock-pref-${Date.now()}`,
@@ -100,12 +102,12 @@ export async function createPreference(input: {
   };
 
   try {
-    const result = await makeRequest(1);
+    const result = await mpCircuitBreaker.execute(() => makeRequest(1));
     clearTimeout(timeoutId);
     return result;
   } catch (err) {
     clearTimeout(timeoutId);
-    console.error("MercadoPago preference creation failed:", err instanceof Error ? err.message : err);
+    logger.error({ err, component: "mercadopago" }, "MercadoPago preference creation failed");
     if (process.env.NODE_ENV === "production") {
       throw new Error("MercadoPago preference creation failed");
     }

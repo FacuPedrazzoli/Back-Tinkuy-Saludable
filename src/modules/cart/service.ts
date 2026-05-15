@@ -2,18 +2,32 @@ import { redis, isRedisAvailable } from "@lib/redis";
 import { ValidationError } from "@lib/errors";
 import { getStockCached } from "@lib/cache";
 import { prisma } from "@lib/prisma";
+import { sanitizeString } from "@lib/validation";
+import { config } from "@lib/config";
 import { randomUUID } from "crypto";
 import { LRUCache } from "lru-cache";
 
-const CART_TTL_SECONDS = 24 * 60 * 60;
+const CART_TTL_SECONDS = config.cart.ttlSeconds;
 
-const CART_LOCK_TTL_SECONDS = 5;
-const CART_LOCK_RETRY_COUNT = 3;
-const CART_LOCK_RETRY_DELAY_MS = 100;
+const CART_LOCK_TTL_SECONDS = config.cart.lockTtlSeconds;
+const CART_LOCK_RETRY_COUNT = config.cart.lockRetryCount;
+const CART_LOCK_RETRY_DELAY_MS = config.cart.lockRetryDelayMs;
 
 const memoryCarts = new LRUCache<string, Cart>({
   max: 1000,
   ttl: CART_TTL_SECONDS * 1000,
+});
+
+interface CartSnapshot {
+  cart: Cart;
+  tenantId: string;
+  branchId: string;
+  validatedAt: number;
+}
+
+const memorySnapshots = new LRUCache<string, CartSnapshot>({
+  max: 1000,
+  ttl: 15 * 60 * 1000,
 });
 
 export interface CartItem {
@@ -33,12 +47,12 @@ export interface Cart {
   totalAmount: number;
 }
 
-function cartKey(cartId: string): string {
-  return `cart:${cartId}`;
+function cartKey(cartId: string, tenantId: string): string {
+  return `cart:${tenantId}:${cartId}`;
 }
 
-function userCartKey(userId: string): string {
-  return `cart:user:${userId}`;
+function userCartKey(userId: string, tenantId: string): string {
+  return `cart:${tenantId}:user:${userId}`;
 }
 
 function lockKey(key: string): string {
@@ -72,12 +86,24 @@ async function releaseLock(key: string): Promise<void> {
   await redis.del(lockKey(key));
 }
 
+function isValidCart(obj: unknown): obj is Cart {
+  if (!obj || typeof obj !== "object") return false;
+  const cart = obj as Record<string, unknown>;
+  return (
+    typeof cart.id === "string" &&
+    Array.isArray(cart.items) &&
+    typeof cart.totalItems === "number" &&
+    typeof cart.totalAmount === "number"
+  );
+}
+
 async function getCartRaw(key: string): Promise<Cart | null> {
   if (await isRedisAvailable()) {
     const data = await redis.get(key);
     if (!data) return null;
     try {
-      const parsed = JSON.parse(data) as Cart;
+      const parsed = JSON.parse(data);
+      if (!isValidCart(parsed)) return null;
       await redis.expire(key, CART_TTL_SECONDS);
       return parsed;
     } catch {
@@ -96,12 +122,13 @@ async function saveCart(key: string, cart: Cart): Promise<void> {
   }
 }
 
-export async function getGuestCart(cartId: string): Promise<Cart> {
-  const cart = await getCartRaw(cartKey(cartId));
+export async function getGuestCart(cartId: string, tenantId: string, isUserCart = false): Promise<Cart> {
+  const key = isUserCart ? userCartKey(cartId, tenantId) : cartKey(cartId, tenantId);
+  const cart = await getCartRaw(key);
   return cart ?? { id: cartId, items: [], totalItems: 0, totalAmount: 0 };
 }
 
-export async function createGuestCart(): Promise<string> {
+export async function createGuestCart(tenantId: string): Promise<string> {
   const cartId = randomUUID();
   const cart: Cart = {
     id: cartId,
@@ -109,12 +136,12 @@ export async function createGuestCart(): Promise<string> {
     totalItems: 0,
     totalAmount: 0,
   };
-  await saveCart(cartKey(cartId), cart);
+  await saveCart(cartKey(cartId, tenantId), cart);
   return cartId;
 }
 
-export async function getUserCart(userId: string): Promise<Cart> {
-  const cart = await getCartRaw(userCartKey(userId));
+export async function getUserCart(userId: string, tenantId: string): Promise<Cart> {
+  const cart = await getCartRaw(userCartKey(userId, tenantId));
   return cart ?? { id: userId, items: [], totalItems: 0, totalAmount: 0 };
 }
 
@@ -131,7 +158,7 @@ export async function addToCart(
   tenantId?: string,
   branchId?: string
 ): Promise<Cart> {
-  const key = isUserCart ? userCartKey(cartId) : cartKey(cartId);
+  const key = isUserCart ? userCartKey(cartId, tenantId ?? "") : cartKey(cartId, tenantId ?? "");
 
   if (!await acquireLock(key)) {
     throw new ValidationError("Cart is being modified, please retry");
@@ -154,20 +181,20 @@ export async function addToCart(
     if (existingIndex >= 0) {
       const newQuantity = cart.items[existingIndex].quantity + item.quantity;
       if (tenantId && branchId) {
-        const stockResult = await getStockCached(item.productId, branchId, item.variantId);
+        const stockResult = await getStockCached(item.productId, branchId, item.variantId, tenantId);
         if (stockResult.found && stockResult.value < newQuantity) {
           throw new ValidationError(
-            `Insufficient stock for ${item.name}: available ${stockResult.value}, requested ${newQuantity}`
+            `Insufficient stock for ${sanitizeString(item.name)}: available ${stockResult.value}, requested ${newQuantity}`
           );
         }
       }
       cart.items[existingIndex].quantity = newQuantity;
     } else {
       if (tenantId && branchId) {
-        const stockResult = await getStockCached(item.productId, branchId, normalizedVariantId);
+        const stockResult = await getStockCached(item.productId, branchId, normalizedVariantId, tenantId);
         if (stockResult.found && stockResult.value < item.quantity) {
           throw new ValidationError(
-            `Insufficient stock for ${item.name}: available ${stockResult.value}, requested ${item.quantity}`
+            `Insufficient stock for ${sanitizeString(item.name)}: available ${stockResult.value}, requested ${item.quantity}`
           );
         }
       }
@@ -190,13 +217,14 @@ export async function updateCartItem(
   productId: string,
   quantity: number,
   variantId?: string | null,
-  isUserCart = false
+  isUserCart = false,
+  tenantId?: string
 ): Promise<Cart> {
   if (quantity < 0) {
     throw new ValidationError("Quantity cannot be negative");
   }
 
-  const key = isUserCart ? userCartKey(cartId) : cartKey(cartId);
+  const key = isUserCart ? userCartKey(cartId, tenantId ?? "") : cartKey(cartId, tenantId ?? "");
 
   if (!await acquireLock(key)) {
     throw new ValidationError("Cart is being modified, please retry");
@@ -238,13 +266,14 @@ export async function removeFromCart(
   cartId: string,
   productId: string,
   variantId?: string | null,
-  isUserCart = false
+  isUserCart = false,
+  tenantId?: string
 ): Promise<Cart> {
-  return updateCartItem(cartId, productId, 0, variantId, isUserCart);
+  return updateCartItem(cartId, productId, 0, variantId, isUserCart, tenantId);
 }
 
-export async function clearCart(cartId: string, isUserCart = false): Promise<void> {
-  const key = isUserCart ? userCartKey(cartId) : cartKey(cartId);
+export async function clearCart(cartId: string, tenantId: string, isUserCart = false): Promise<void> {
+  const key = isUserCart ? userCartKey(cartId, tenantId) : cartKey(cartId, tenantId);
   if (await isRedisAvailable()) {
     await redis.del(key);
   } else {
@@ -254,10 +283,11 @@ export async function clearCart(cartId: string, isUserCart = false): Promise<voi
 
 export async function mergeGuestCartIntoUserCart(
   guestCartId: string,
-  userId: string
+  userId: string,
+  tenantId: string
 ): Promise<Cart> {
-  const guestKey = cartKey(guestCartId);
-  const userKey = userCartKey(userId);
+  const guestKey = cartKey(guestCartId, tenantId);
+  const userKey = userCartKey(userId, tenantId);
 
   if (!(await isRedisAvailable())) {
     throw new ValidationError("Cart merge requires Redis for atomicity");
@@ -273,8 +303,8 @@ export async function mergeGuestCartIntoUserCart(
   }
 
   try {
-    const guestCart = await getGuestCart(guestCartId);
-    const userCart = await getUserCart(userId);
+    const guestCart = await getGuestCart(guestCartId, tenantId);
+    const userCart = await getUserCart(userId, tenantId);
 
     for (const item of guestCart.items) {
       const existing = userCart.items.find(
@@ -303,30 +333,58 @@ export async function mergeGuestCartIntoUserCart(
 
 export async function validateCartStock(
   cart: Cart,
-  branchId: string
+  branchId: string,
+  tenantId?: string
 ): Promise<{ valid: boolean; errors: string[] }> {
   const errors: string[] = [];
 
-  for (const item of cart.items) {
-    let stock: number | null = null;
-    const stockResult = await getStockCached(item.productId, branchId, item.variantId);
+  const uncachedItems: { productId: string; variantId: string | null; name: string; quantity: number }[] = [];
+
+  const stockResults = await Promise.all(
+    cart.items.map((item) => getStockCached(item.productId, branchId, item.variantId, tenantId))
+  );
+
+  for (let i = 0; i < cart.items.length; i++) {
+    const item = cart.items[i];
+    const stockResult = stockResults[i];
     if (stockResult.found) {
-      stock = stockResult.value;
+      if (stockResult.value < item.quantity) {
+        errors.push(
+          `Insufficient stock for ${sanitizeString(item.name)}: available ${stockResult.value}, requested ${item.quantity}`
+        );
+      }
     } else {
-      const result = await prisma.stockMovement.aggregate({
-        where: {
-          branchId,
-          productId: item.productId,
-          variantId: item.variantId ?? null,
-        },
-        _sum: { quantity: true },
-      });
-      stock = result._sum.quantity ?? 0;
+      uncachedItems.push(item);
     }
-    if (stock < item.quantity) {
-      errors.push(
-        `Insufficient stock for ${item.name}: available ${stock}, requested ${item.quantity}`
-      );
+  }
+
+  if (uncachedItems.length > 0) {
+    const productIds = [...new Set(uncachedItems.map((i) => i.productId))];
+    const movements = await prisma.stockMovement.groupBy({
+      by: ["productId", "variantId"],
+      where: {
+        branchId,
+        productId: { in: productIds },
+        OR: uncachedItems.map((i) => ({
+          productId: i.productId,
+          variantId: i.variantId,
+        })),
+      },
+      _sum: { quantity: true },
+    });
+
+    const stockMap = new Map<string, number>();
+    for (const m of movements) {
+      stockMap.set(`${m.productId}:${m.variantId ?? "null"}`, Number(m._sum.quantity ?? 0));
+    }
+
+    for (const item of uncachedItems) {
+      const stock = stockMap.get(`${item.productId}:${item.variantId ?? "null"}`) ?? 0;
+      if (stock < item.quantity) {
+        errors.push(
+          `Insufficient stock for ${sanitizeString(item.name)}: available ${stock}, requested ${item.quantity}`
+        );
+      }
     }
   }
 
@@ -339,39 +397,49 @@ export async function storeValidatedCartSnapshot(
   branchId: string,
   preferenceId: string
 ): Promise<void> {
-  const snapshotKey = `checkout:snapshot:${preferenceId}`;
-  const snapshot = {
+  const snapshotKey = `checkout:${tenantId}:snapshot:${preferenceId}`;
+  const snapshot: CartSnapshot = {
     cart,
     tenantId,
     branchId,
     validatedAt: Date.now(),
   };
+  const SNAPSHOT_TTL_SECONDS = 24 * 60 * 60;
   if (await isRedisAvailable()) {
-    await redis.setex(snapshotKey, 15 * 60, JSON.stringify(snapshot));
+    await redis.setex(snapshotKey, SNAPSHOT_TTL_SECONDS, JSON.stringify(snapshot));
   } else {
-    memoryCarts.set(snapshotKey, snapshot as unknown as Cart);
+    memorySnapshots.set(snapshotKey, snapshot);
   }
 }
 
 export async function getValidatedCartSnapshot(
-  preferenceId: string
+  preferenceId: string,
+  tenantId: string
 ): Promise<{ cart: Cart; tenantId: string; branchId: string } | null> {
-  const snapshotKey = `checkout:snapshot:${preferenceId}`;
+  const snapshotKey = `checkout:${tenantId}:snapshot:${preferenceId}`;
   if (await isRedisAvailable()) {
     const data = await redis.get(snapshotKey);
     if (!data) return null;
-    return JSON.parse(data);
+    try {
+      const parsed = JSON.parse(data) as CartSnapshot;
+      if (!parsed.cart || !parsed.tenantId || !parsed.branchId) {
+        return null;
+      }
+      return { cart: parsed.cart, tenantId: parsed.tenantId, branchId: parsed.branchId };
+    } catch {
+      return null;
+    }
   }
-  const snapshot = memoryCarts.get(snapshotKey);
+  const snapshot = memorySnapshots.get(snapshotKey);
   if (!snapshot) return null;
-  return snapshot as unknown as { cart: Cart; tenantId: string; branchId: string };
+  return { cart: snapshot.cart, tenantId: snapshot.tenantId, branchId: snapshot.branchId };
 }
 
-export async function clearValidatedCartSnapshot(preferenceId: string): Promise<void> {
-  const snapshotKey = `checkout:snapshot:${preferenceId}`;
+export async function clearValidatedCartSnapshot(preferenceId: string, tenantId: string): Promise<void> {
+  const snapshotKey = `checkout:${tenantId}:snapshot:${preferenceId}`;
   if (await isRedisAvailable()) {
     await redis.del(snapshotKey);
   } else {
-    memoryCarts.delete(snapshotKey);
+    memorySnapshots.delete(snapshotKey);
   }
 }

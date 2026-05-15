@@ -1,6 +1,7 @@
 import { prisma } from "@lib/prisma";
-import { ConflictError, NotFoundError, ValidationError } from "@lib/errors";
+import { ConflictError, NotFoundError, ValidationError, ForbiddenError } from "@lib/errors";
 import { sanitizeSlug } from "@lib/validation";
+import { queryCache, TENANT_CACHE_TTL } from "@lib/query-cache";
 
 export async function createTenant(input: {
   name: string;
@@ -31,18 +32,25 @@ export async function createTenant(input: {
 }
 
 export async function getTenantBySlug(slug: string) {
+  const cacheKey = `tenant:slug:${slug}`;
+  const cached = await queryCache.get<NonNullable<ReturnType<typeof prisma.tenant.findUnique>>>(cacheKey);
+  if (cached) return cached;
+
   const tenant = await prisma.tenant.findUnique({
     where: { slug },
     include: { branches: true },
   });
   if (!tenant) throw new NotFoundError("Tenant");
+
+  await queryCache.set(cacheKey, tenant, { ttlSeconds: TENANT_CACHE_TTL });
   return tenant;
 }
 
 export async function listTenants(args: { take?: number; skip?: number }) {
+  const take = Math.min(args.take ?? 20, 100);
   const [items, count] = await Promise.all([
     prisma.tenant.findMany({
-      take: args.take ?? 20,
+      take,
       skip: args.skip ?? 0,
       orderBy: { createdAt: "desc" },
       include: { _count: { select: { branches: true, customers: true } } },
@@ -80,9 +88,12 @@ export async function createBranch(input: {
   });
 }
 
-export async function listBranches(tenantId: string) {
+export async function listBranches(tenantId: string, args: { take?: number; skip?: number } = {}) {
+  const take = Math.min(args.take ?? 50, 100);
   return prisma.branch.findMany({
     where: { tenantId },
+    take,
+    skip: args.skip ?? 0,
     orderBy: { createdAt: "asc" },
   });
 }
@@ -95,8 +106,13 @@ export async function getBranch(id: string, tenantId: string) {
 
 export async function updateBranch(
   id: string,
-  input: { name?: string; address?: string; phone?: string; isActive?: boolean }
+  input: { name?: string; address?: string; phone?: string; isActive?: boolean },
+  tenantId: string
 ) {
+  const branch = await prisma.branch.findUnique({ where: { id } });
+  if (!branch) throw new NotFoundError("Branch");
+  if (branch.tenantId !== tenantId) throw new ForbiddenError("Branch does not belong to this tenant");
+
   return prisma.branch.update({
     where: { id },
     data: input,

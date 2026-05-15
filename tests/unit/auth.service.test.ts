@@ -4,7 +4,7 @@ import { hashSync } from "bcryptjs";
 const mockAdminUser = {
   id: "admin-1",
   email: "admin@test.com",
-  password: hashSync("password123", 12),
+  password: hashSync("Admin123!", 12),
   firstName: "Admin",
   lastName: "User",
   role: "admin",
@@ -22,7 +22,7 @@ const mockCustomer = {
   lastName: "Doe",
   tenantId: "tenant-1",
   isActive: true,
-  password: hashSync("password123", 12),
+  password: hashSync("Customer123!", 12),
   phone: null,
   createdAt: new Date(),
   updatedAt: new Date(),
@@ -72,14 +72,14 @@ describe("Auth Service", () => {
 
       const result = await adminLogin({
         email: "admin@test.com",
-        password: "password123",
+        password: "Admin123!",
         tenantId: "tenant-1",
       });
 
       expect(result.token).toBe("admin-token");
       expect(result.user.email).toBe("admin@test.com");
       expect(mockedPrisma.adminUser.findUnique).toHaveBeenCalledWith({
-        where: { email: "admin@test.com", tenantId: "tenant-1" },
+        where: { tenantId_email: { tenantId: "tenant-1", email: "admin@test.com" } },
       });
     });
 
@@ -98,7 +98,7 @@ describe("Auth Service", () => {
       });
 
       await expect(
-        adminLogin({ email: "admin@test.com", password: "password123", tenantId: "tenant-1" })
+        adminLogin({ email: "admin@test.com", password: "Admin123!", tenantId: "tenant-1" })
       ).rejects.toThrow("Invalid credentials");
     });
   });
@@ -123,7 +123,7 @@ describe("Auth Service", () => {
       const result = await createAdmin({
         tenantId: "tenant-1",
         email: "newadmin@test.com",
-        password: "password123",
+        password: "Admin123!",
         firstName: "New",
         lastName: "Admin",
         role: "manager",
@@ -148,7 +148,7 @@ describe("Auth Service", () => {
         createAdmin({
           tenantId: "tenant-1",
           email: "admin@test.com",
-          password: "password123",
+          password: "Admin123!",
           firstName: "New",
           lastName: "Admin",
         })
@@ -166,7 +166,7 @@ describe("Auth Service", () => {
           firstName: "New",
           lastName: "Admin",
         })
-      ).rejects.toThrow("Password must be at least 8 characters");
+      ).rejects.toThrow("Mínimo 8 caracteres");
     });
   });
 
@@ -176,7 +176,7 @@ describe("Auth Service", () => {
 
       const result = await customerLogin({
         email: "customer@test.com",
-        password: "password123",
+        password: "Customer123!",
         tenantId: "tenant-1",
       });
 
@@ -199,18 +199,18 @@ describe("Auth Service", () => {
       });
 
       await expect(
-        customerLogin({ email: "customer@test.com", password: "password123", tenantId: "tenant-1" })
+        customerLogin({ email: "customer@test.com", password: "Customer123!", tenantId: "tenant-1" })
       ).rejects.toThrow("Invalid credentials");
     });
 
     it("throws for wrong password", async () => {
       vi.mocked(mockedPrisma.customer.findUnique).mockResolvedValue({
         ...mockCustomer,
-        password: hashSync("correctpassword", 12),
+        password: hashSync("CorrectPass1!", 12),
       });
 
       await expect(
-        customerLogin({ email: "customer@test.com", password: "wrongpassword", tenantId: "tenant-1" })
+        customerLogin({ email: "customer@test.com", password: "WrongPass1!", tenantId: "tenant-1" })
       ).rejects.toThrow("Invalid credentials");
     });
   });
@@ -234,7 +234,7 @@ describe("Auth Service", () => {
       const result = await customerRegister({
         tenantId: "tenant-1",
         email: "customer@test.com",
-        password: "password123",
+        password: "Customer123!",
         firstName: "John",
         lastName: "Doe",
       });
@@ -253,7 +253,7 @@ describe("Auth Service", () => {
         customerRegister({
           tenantId: "tenant-1",
           email: "existing@test.com",
-          password: "password123",
+          password: "Customer123!",
           firstName: "John",
           lastName: "Doe",
         })
@@ -263,7 +263,7 @@ describe("Auth Service", () => {
 
   describe("changePassword", () => {
     it("updates password for admin user", async () => {
-      const oldHash = hashSync("oldpass", 12);
+      const oldHash = hashSync("OldPass1!", 12);
       vi.mocked(mockedPrisma.adminUser.findUnique).mockResolvedValue({
         id: "admin-1",
         password: oldHash,
@@ -281,7 +281,7 @@ describe("Auth Service", () => {
         id: "admin-1",
       });
 
-      const result = await changePassword("admin-1", "admin", "oldpass", "newpass123");
+      const result = await changePassword("admin-1", "admin", "OldPass1!", "NewPass2@");
       expect(result).toBe(true);
       expect(mockedPrisma.adminUser.update).toHaveBeenCalled();
     });
@@ -289,7 +289,7 @@ describe("Auth Service", () => {
     it("throws for wrong old password", async () => {
       vi.mocked(mockedPrisma.adminUser.findUnique).mockResolvedValue({
         id: "admin-1",
-        password: hashSync("correct", 12),
+        password: hashSync("CorrectPass1!", 12),
         email: "admin@test.com",
         firstName: "Admin",
         lastName: "User",
@@ -302,18 +302,18 @@ describe("Auth Service", () => {
       });
 
       await expect(
-        changePassword("admin-1", "admin", "wrong", "newpass123")
+        changePassword("admin-1", "admin", "WrongPass1!", "NewPass2@")
       ).rejects.toThrow("Invalid current password");
     });
 
     it("throws for short new password", async () => {
       await expect(
-        changePassword("admin-1", "admin", "oldpass", "short")
-      ).rejects.toThrow("Password must be at least 8 characters");
+        changePassword("admin-1", "admin", "OldPass1!", "short")
+      ).rejects.toThrow("Mínimo 8 caracteres");
     });
 
     it("updates password for customer user", async () => {
-      const oldHash = hashSync("oldpass", 12);
+      const oldHash = hashSync("OldPass1!", 12);
       vi.mocked(mockedPrisma.customer.findUnique).mockResolvedValue({
         id: "cust-1",
         password: oldHash,
@@ -330,7 +330,7 @@ describe("Auth Service", () => {
         id: "cust-1",
       });
 
-      const result = await changePassword("cust-1", "customer", "oldpass", "newpass123");
+      const result = await changePassword("cust-1", "customer", "OldPass1!", "NewPass2@");
       expect(result).toBe(true);
       expect(mockedPrisma.customer.update).toHaveBeenCalled();
     });

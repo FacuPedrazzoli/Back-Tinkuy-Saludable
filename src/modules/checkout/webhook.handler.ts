@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import { createHmac } from "crypto";
 import { MercadoPagoConfig } from "mercadopago";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@lib/prisma";
 import { ValidationError } from "@lib/errors";
 import { clearCart, getValidatedCartSnapshot, clearValidatedCartSnapshot } from "@modules/cart/service";
@@ -37,15 +38,19 @@ async function processWebhookWithTimeout(req: Request, res: Response): Promise<R
   const signature = req.headers["x-signature"] as string | undefined;
   const webhookSecret = process.env.MP_WEBHOOK_SECRET;
 
-  if (webhookSecret && signature) {
+  if (!webhookSecret || !signature) {
+    if (process.env.NODE_ENV === "production") {
+      console.error("Webhook verification failed: missing secret or signature");
+      return res.status(401).json({ error: "Missing webhook credentials" });
+    }
+    console.warn("Webhook signature not verified in development mode");
+  } else {
     const rawPayload = Buffer.isBuffer(req.body) ? req.body.toString() : JSON.stringify(req.body);
     const isValid = verifyMercadoPagoSignature(rawPayload, signature, webhookSecret);
     if (!isValid) {
+      console.error("Invalid webhook signature");
       return res.status(401).json({ error: "Invalid webhook signature" });
     }
-  } else if (process.env.NODE_ENV === "production" && !webhookSecret) {
-    console.error("MP_WEBHOOK_SECRET not configured in production");
-    return res.status(500).json({ error: "Webhook secret not configured" });
   }
 
   const payload = Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString()) : req.body;
@@ -62,23 +67,56 @@ async function processWebhookWithTimeout(req: Request, res: Response): Promise<R
 
   const paymentId = String(data.id);
 
-  const upserted = await prisma.webhookEvent.upsert({
+  const existingEvent = await prisma.webhookEvent.findUnique({
     where: {
       source_eventId: { source: "mercadopago", eventId: paymentId },
     },
-    update: { payload: payload as any, processed: false },
-    create: {
-      source: "mercadopago",
-      eventId: paymentId,
-      payload: payload as any,
-      processed: false,
-    },
   });
 
-  if (upserted.processed) {
+  if (existingEvent?.processed) {
     return res.status(200).json({ message: "Already processed" });
   }
 
+  let event;
+  try {
+    event = await prisma.$transaction(async (tx) => {
+      if (existingEvent) {
+        const updated = await tx.webhookEvent.updateMany({
+          where: {
+            source_eventId: { source: "mercadopago", eventId: paymentId },
+            processed: false,
+          },
+          data: { payload: payload as any, processed: true },
+        });
+        if (updated.count === 0) {
+          return null;
+        }
+        return tx.webhookEvent.findUnique({
+          where: { source_eventId: { source: "mercadopago", eventId: paymentId } },
+        });
+      } else {
+        return tx.webhookEvent.create({
+          data: {
+            source: "mercadopago",
+            eventId: paymentId,
+            payload: payload as any,
+            processed: true,
+          },
+        });
+      }
+    });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      return null;
+    }
+    throw error;
+  }
+
+  if (!event) {
+    return res.status(200).json({ message: "Already processed" });
+  }
+
+  try {
     const paymentStatus = payload.data?.status ?? payload.action;
 
     if (paymentStatus === "payment.created" || paymentStatus === "payment.updated") {
@@ -87,15 +125,11 @@ async function processWebhookWithTimeout(req: Request, res: Response): Promise<R
 
       if (status === "approved") {
         await processApprovedPayment(payload, mpPayment);
-      } else {
-        await prisma.webhookEvent.update({
-          where: {
-            source_eventId: { source: "mercadopago", eventId: paymentId },
-          },
-          data: { processed: true },
-        });
       }
     }
+  } catch (err) {
+    console.error("Error processing webhook:", err);
+  }
 
   return res.status(200).json({ received: true });
 }
@@ -127,7 +161,8 @@ async function processApprovedPayment(payload: any, mpPayment: any) {
     throw new ValidationError("Invalid payer email format");
   }
 
-  const snapshot = await getValidatedCartSnapshot(preferenceId);
+  const tenantIdFromExtRef = mpPayment.external_reference?.split(":")[0] ?? "";
+  const snapshot = await getValidatedCartSnapshot(preferenceId, tenantIdFromExtRef);
 
   if (!snapshot) {
     console.warn("Cart snapshot not found for webhook", preferenceId);
@@ -143,7 +178,7 @@ async function processApprovedPayment(payload: any, mpPayment: any) {
 
   if (cart.items.length === 0) {
     console.warn("Cart empty or expired for webhook", preferenceId);
-    await clearValidatedCartSnapshot(preferenceId);
+    await clearValidatedCartSnapshot(preferenceId, tenantId);
     await prisma.webhookEvent.updateMany({
       where: { eventId: paymentId, source: "mercadopago" },
       data: { processed: true },
@@ -162,29 +197,32 @@ async function processApprovedPayment(payload: any, mpPayment: any) {
 
   const cartId = payload.data?.external_reference?.split(":")[2] ?? "";
 
-  await createOrderFromCheckout({
-    tenantId,
-    branchId,
-    customerId: isUserCart ? cartId : undefined,
-    guestEmail: guestEmail,
-    paymentId,
-    preferenceId,
-    items: cart.items.map((item: any) => ({
-      productId: item.productId,
-      variantId: item.variantId,
-      name: item.name,
-      sku: item.sku ?? null,
-      price: item.price,
-      quantity: item.quantity,
-    })),
-    totalAmount: cart.totalAmount,
-  });
+  try {
+    await createOrderFromCheckout({
+      tenantId,
+      branchId,
+      customerId: isUserCart ? cartId : undefined,
+      guestEmail: guestEmail,
+      paymentId,
+      preferenceId,
+      items: cart.items.map((item: any) => ({
+        productId: item.productId,
+        variantId: item.variantId,
+        name: item.name,
+        sku: item.sku ?? null,
+        price: item.price,
+        quantity: item.quantity,
+      })),
+      totalAmount: cart.totalAmount,
+    });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      console.log("Order already exists for paymentId:", paymentId);
+    } else {
+      throw error;
+    }
+  }
 
-  await clearCart(cartId, isUserCart);
-  await clearValidatedCartSnapshot(preferenceId);
-
-  await prisma.webhookEvent.updateMany({
-    where: { eventId: paymentId, source: "mercadopago" },
-    data: { processed: true },
-  });
+  await clearCart(cartId, tenantId, isUserCart);
+  await clearValidatedCartSnapshot(preferenceId, tenantId);
 }

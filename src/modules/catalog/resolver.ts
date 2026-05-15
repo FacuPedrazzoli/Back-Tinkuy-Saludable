@@ -1,7 +1,8 @@
 import { builder } from "@graphql/builder";
 import * as catalogService from "./service";
 import { moneySchema } from "@lib/validation";
-import { ValidationError } from "@lib/errors";
+import { ValidationError, ForbiddenError } from "@lib/errors";
+import { rateLimitGeneral } from "@lib/rate-limit";
 
 // ─── Types ───
 
@@ -22,7 +23,6 @@ export const Product = builder.prismaObject("Product", {
     images: t.relation("images"),
     tags: t.relation("tags"),
     suppliers: t.relation("suppliers"),
-    // Stock computed field
     stock: t.field({
       type: "Int",
       nullable: true,
@@ -30,8 +30,12 @@ export const Product = builder.prismaObject("Product", {
       resolve: async (product, args, ctx) => {
         const branchId = args.branchId ?? ctx.user?.branchId;
         if (!branchId) return null;
-        const cached = await catalogService.getProductStock(product.id, branchId);
-        return cached ?? 0;
+        try {
+          const cached = await ctx.stockLoader.load({ tenantId: ctx.tenantId!, productId: product.id, branchId });
+          return cached ?? 0;
+        } catch {
+          return 0;
+        }
       },
     }),
   }),
@@ -56,8 +60,12 @@ export const ProductVariant = builder.prismaObject("ProductVariant", {
       resolve: async (variant, args, ctx) => {
         const branchId = args.branchId ?? ctx.user?.branchId;
         if (!branchId) return null;
-        const cached = await catalogService.getProductStock(variant.id, branchId);
-        return cached ?? 0;
+        try {
+          const cached = await ctx.stockLoader.load({ tenantId: ctx.tenantId!, productId: variant.id, branchId, variantId: variant.id });
+          return cached ?? 0;
+        } catch {
+          return 0;
+        }
       },
     }),
   }),
@@ -119,10 +127,10 @@ export const ProductSupplier = builder.prismaObject("ProductSupplier", {
 
 const CreateProductInput = builder.inputType("CreateProductInput", {
   fields: (t) => ({
-    name: t.string({ required: true }),
-    slug: t.string(),
-    description: t.string(),
-    sku: t.string(),
+    name: t.string({ required: true, maxLength: 255 }),
+    slug: t.string({ maxLength: 120 }),
+    description: t.string({ maxLength: 5000 }),
+    sku: t.string({ maxLength: 100 }),
     basePrice: t.float({ required: true }),
     tagIds: t.stringList(),
     supplierIds: t.stringList(),
@@ -131,10 +139,10 @@ const CreateProductInput = builder.inputType("CreateProductInput", {
 
 const UpdateProductInput = builder.inputType("UpdateProductInput", {
   fields: (t) => ({
-    name: t.string(),
-    slug: t.string(),
-    description: t.string(),
-    sku: t.string(),
+    name: t.string({ maxLength: 255 }),
+    slug: t.string({ maxLength: 120 }),
+    description: t.string({ maxLength: 5000 }),
+    sku: t.string({ maxLength: 100 }),
     basePrice: t.float(),
     isActive: t.boolean(),
     isVisible: t.boolean(),
@@ -144,17 +152,17 @@ const UpdateProductInput = builder.inputType("UpdateProductInput", {
 
 const CreateVariantInput = builder.inputType("CreateVariantInput", {
   fields: (t) => ({
-    productId: t.string({ required: true }),
-    sku: t.string({ required: true }),
-    name: t.string({ required: true }),
+    productId: t.string({ required: true, maxLength: 64 }),
+    sku: t.string({ required: true, maxLength: 100 }),
+    name: t.string({ required: true, maxLength: 255 }),
     price: t.float({ required: true }),
   }),
 });
 
 const UpdateVariantInput = builder.inputType("UpdateVariantInput", {
   fields: (t) => ({
-    sku: t.string(),
-    name: t.string(),
+    sku: t.string({ maxLength: 100 }),
+    name: t.string({ maxLength: 255 }),
     price: t.float(),
     isActive: t.boolean(),
   }),
@@ -162,26 +170,26 @@ const UpdateVariantInput = builder.inputType("UpdateVariantInput", {
 
 const CreateTagInput = builder.inputType("CreateTagInput", {
   fields: (t) => ({
-    name: t.string({ required: true }),
-    slug: t.string(),
+    name: t.string({ required: true, maxLength: 100 }),
+    slug: t.string({ maxLength: 120 }),
   }),
 });
 
 const CreateSupplierInput = builder.inputType("CreateSupplierInput", {
   fields: (t) => ({
-    name: t.string({ required: true }),
-    email: t.string(),
-    phone: t.string(),
-    address: t.string(),
+    name: t.string({ required: true, maxLength: 255 }),
+    email: t.string({ maxLength: 255 }),
+    phone: t.string({ maxLength: 20 }),
+    address: t.string({ maxLength: 500 }),
   }),
 });
 
 const CreateAttributeInput = builder.inputType("CreateAttributeInput", {
   fields: (t) => ({
-    productId: t.string(),
-    variantId: t.string(),
-    key: t.string({ required: true }),
-    value: t.string({ required: true }),
+    productId: t.string({ maxLength: 64 }),
+    variantId: t.string({ maxLength: 64 }),
+    key: t.string({ required: true, maxLength: 100 }),
+    value: t.string({ required: true, maxLength: 500 }),
   }),
 });
 
@@ -211,7 +219,7 @@ builder.queryField("products", (t) =>
     },
     authScopes: { public: true },
     resolve: async (_parent, args, ctx) => {
-      if (!ctx.tenantId) throw new Error("Tenant ID required");
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
       return catalogService.listProducts({
         tenantId: ctx.tenantId,
         search: args.search ?? undefined,
@@ -230,7 +238,7 @@ builder.queryField("product", (t) =>
     args: { id: t.arg.string({ required: true }) },
     authScopes: { public: true },
     resolve: async (_parent, args, ctx) => {
-      if (!ctx.tenantId) throw new Error("Tenant ID required");
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
       return catalogService.getProduct(args.id, ctx.tenantId, true);
     },
   })
@@ -241,7 +249,7 @@ builder.queryField("tags", (t) =>
     type: [Tag],
     authScopes: { public: true },
     resolve: async (_parent, _args, ctx) => {
-      if (!ctx.tenantId) throw new Error("Tenant ID required");
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
       return catalogService.listTags(ctx.tenantId);
     },
   })
@@ -252,7 +260,7 @@ builder.queryField("suppliers", (t) =>
     type: [Supplier],
     authScopes: { manager: true },
     resolve: async (_parent, _args, ctx) => {
-      if (!ctx.tenantId) throw new Error("Tenant ID required");
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
       return catalogService.listSuppliers(ctx.tenantId);
     },
   })
@@ -266,7 +274,11 @@ builder.mutationField("createProduct", (t) =>
     args: { input: t.arg({ type: CreateProductInput, required: true }) },
     authScopes: { manager: true },
     resolve: async (_parent, { input }, ctx) => {
-      if (!ctx.tenantId) throw new Error("Tenant ID required");
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      await rateLimitGeneral(`product:${ctx.tenantId}`);
+      if (input.basePrice < 0) {
+        throw new ValidationError("Price cannot be negative");
+      }
       const result = moneySchema.safeParse(input.basePrice);
       if (!result.success) throw new ValidationError(result.error.errors[0]?.message ?? "Invalid price");
       return catalogService.createProduct({
@@ -290,12 +302,18 @@ builder.mutationField("updateProduct", (t) =>
       input: t.arg({ type: UpdateProductInput, required: true }),
     },
     authScopes: { manager: true },
-    resolve: async (_parent, { id, input }) => {
+    resolve: async (_parent, { id, input }, ctx) => {
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      await rateLimitGeneral(`product:${ctx.tenantId}`);
       if (input.basePrice !== undefined && input.basePrice !== null) {
+        if (input.basePrice < 0) {
+          throw new ValidationError("Price cannot be negative");
+        }
         const result = moneySchema.safeParse(input.basePrice);
         if (!result.success) throw new ValidationError(result.error.errors[0]?.message ?? "Invalid price");
       }
       return catalogService.updateProduct(id, {
+        tenantId: ctx.tenantId,
         ...input,
         name: input.name ?? undefined,
         slug: input.slug ?? undefined,
@@ -315,7 +333,11 @@ builder.mutationField("deleteProduct", (t) =>
     type: Product,
     args: { id: t.arg.string({ required: true }) },
     authScopes: { manager: true },
-    resolve: async (_parent, { id }) => catalogService.deleteProduct(id),
+    resolve: async (_parent, { id }, ctx) => {
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      await rateLimitGeneral(`product:${ctx.tenantId}`);
+      return catalogService.deleteProduct(id, ctx.tenantId);
+    },
   })
 );
 
@@ -324,10 +346,15 @@ builder.mutationField("createVariant", (t) =>
     type: ProductVariant,
     args: { input: t.arg({ type: CreateVariantInput, required: true }) },
     authScopes: { manager: true },
-    resolve: async (_parent, { input }) => {
+    resolve: async (_parent, { input }, ctx) => {
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      await rateLimitGeneral(`variant:${ctx.tenantId}`);
+      if (input.price < 0) {
+        throw new ValidationError("Price cannot be negative");
+      }
       const result = moneySchema.safeParse(input.price);
       if (!result.success) throw new ValidationError(result.error.errors[0]?.message ?? "Invalid price");
-      return catalogService.createVariant(input);
+      return catalogService.createVariant(input, ctx.tenantId);
     },
   })
 );
@@ -340,8 +367,13 @@ builder.mutationField("updateVariant", (t) =>
       input: t.arg({ type: UpdateVariantInput, required: true }),
     },
     authScopes: { manager: true },
-    resolve: async (_parent, { id, input }) => {
+    resolve: async (_parent, { id, input }, ctx) => {
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      await rateLimitGeneral(`variant:${ctx.tenantId}`);
       if (input.price !== undefined && input.price !== null) {
+        if (input.price < 0) {
+          throw new ValidationError("Price cannot be negative");
+        }
         const result = moneySchema.safeParse(input.price);
         if (!result.success) throw new ValidationError(result.error.errors[0]?.message ?? "Invalid price");
       }
@@ -351,7 +383,7 @@ builder.mutationField("updateVariant", (t) =>
         name: input.name ?? undefined,
         price: input.price ?? undefined,
         isActive: input.isActive ?? undefined,
-      });
+      }, ctx.tenantId);
     },
   })
 );
@@ -361,7 +393,11 @@ builder.mutationField("deleteVariant", (t) =>
     type: ProductVariant,
     args: { id: t.arg.string({ required: true }) },
     authScopes: { manager: true },
-    resolve: async (_parent, { id }) => catalogService.deleteVariant(id),
+    resolve: async (_parent, { id }, ctx) => {
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      await rateLimitGeneral(`variant:${ctx.tenantId}`);
+      return catalogService.deleteVariant(id, ctx.tenantId);
+    },
   })
 );
 
@@ -371,7 +407,8 @@ builder.mutationField("createTag", (t) =>
     args: { input: t.arg({ type: CreateTagInput, required: true }) },
     authScopes: { manager: true },
     resolve: async (_parent, { input }, ctx) => {
-      if (!ctx.tenantId) throw new Error("Tenant ID required");
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      await rateLimitGeneral(`tag:${ctx.tenantId}`);
       return catalogService.createTag({
         ...input,
         tenantId: ctx.tenantId,
@@ -387,7 +424,8 @@ builder.mutationField("createSupplier", (t) =>
     args: { input: t.arg({ type: CreateSupplierInput, required: true }) },
     authScopes: { manager: true },
     resolve: async (_parent, { input }, ctx) => {
-      if (!ctx.tenantId) throw new Error("Tenant ID required");
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      await rateLimitGeneral(`supplier:${ctx.tenantId}`);
       return catalogService.createSupplier({
         ...input,
         tenantId: ctx.tenantId,
@@ -404,10 +442,18 @@ builder.mutationField("createAttribute", (t) =>
     type: ProductAttribute,
     args: { input: t.arg({ type: CreateAttributeInput, required: true }) },
     authScopes: { manager: true },
-    resolve: async (_parent, { input }) => catalogService.createAttribute({
-      ...input,
-      productId: input.productId ?? undefined,
-      variantId: input.variantId ?? undefined,
-    }),
+    resolve: async (_parent, { input }, ctx) => {
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      if (!input.productId && !input.variantId) {
+        throw new ValidationError("Either productId or variantId is required");
+      }
+      await rateLimitGeneral(`attribute:${ctx.tenantId}`);
+      return catalogService.createAttribute({
+        ...input,
+        tenantId: ctx.tenantId,
+        productId: input.productId ?? undefined,
+        variantId: input.variantId ?? undefined,
+      });
+    },
   })
 );

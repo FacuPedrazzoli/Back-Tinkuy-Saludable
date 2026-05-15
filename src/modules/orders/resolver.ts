@@ -1,5 +1,8 @@
 import { builder } from "@graphql/builder";
 import * as orderService from "./service";
+import { ForbiddenError, AuthenticationError, ValidationError } from "@lib/errors";
+import { rateLimitGeneral } from "@lib/rate-limit";
+import { emailSchema } from "@lib/validation";
 
 export const Order = builder.prismaObject("Order", {
   fields: (t) => ({
@@ -32,9 +35,11 @@ export const OrderItem = builder.prismaObject("OrderItem", {
   }),
 });
 
+const ORDER_STATUSES = ["pending", "confirmed", "cancelled", "refunded"] as const;
+
 const UpdateOrderStatusInput = builder.inputType("UpdateOrderStatusInput", {
   fields: (t) => ({
-    status: t.string({ required: true }),
+    status: t.string({ required: true, maxLength: 20 }),
   }),
 });
 
@@ -60,7 +65,7 @@ builder.queryField("orders", (t) =>
     },
     authScopes: { manager: true },
     resolve: async (_parent, args, ctx) => {
-      if (!ctx.tenantId) throw new Error("Tenant ID required");
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
       return orderService.listOrders({
         tenantId: ctx.tenantId,
         status: (args.status ?? undefined) as "pending" | "confirmed" | "cancelled" | "refunded" | undefined,
@@ -73,16 +78,21 @@ builder.queryField("orders", (t) =>
 
 builder.queryField("myOrders", (t) =>
   t.field({
-    type: [Order],
+    type: OrderList,
+    args: {
+      take: t.arg.int({ defaultValue: 20 }),
+      skip: t.arg.int({ defaultValue: 0 }),
+    },
     authScopes: { customer: true },
-    resolve: async (_parent, _args, ctx) => {
-      if (!ctx.user) throw new Error("Unauthorized");
-      if (!ctx.tenantId) throw new Error("Tenant ID required");
-      const result = await orderService.listOrders({
+    resolve: async (_parent, args, ctx) => {
+      if (!ctx.user) throw new AuthenticationError("Unauthorized");
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      return orderService.listOrders({
         tenantId: ctx.tenantId,
         customerId: ctx.user.id,
+        take: args.take ?? 20,
+        skip: args.skip ?? 0,
       });
-      return result.items;
     },
   })
 );
@@ -93,8 +103,16 @@ builder.queryField("order", (t) =>
     args: { id: t.arg.string({ required: true }) },
     authScopes: { authenticated: true },
     resolve: async (_parent, args, ctx) => {
-      if (!ctx.tenantId) throw new Error("Tenant ID required");
-      return orderService.getOrder(args.id, ctx.tenantId);
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      if (!ctx.user) throw new AuthenticationError("Unauthorized");
+
+      const order = await orderService.getOrder(args.id, ctx.tenantId);
+
+      if (ctx.user.role === "customer" && order.customerId !== ctx.user.id) {
+        throw new ForbiddenError("Access denied to this order");
+      }
+
+      return order;
     },
   })
 );
@@ -104,7 +122,16 @@ builder.queryField("guestOrders", (t) =>
     type: [Order],
     args: { email: t.arg.string({ required: true }) },
     authScopes: { public: true },
-    resolve: async (_parent, args) => orderService.getGuestOrders(args.email),
+    resolve: async (_parent, args, ctx) => {
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      const identifier = ctx.req.ip ?? "anonymous";
+      await rateLimitGeneral(`guestOrders:${identifier}`);
+      const emailValidation = emailSchema.safeParse(args.email);
+      if (!emailValidation.success) {
+        throw new ValidationError("Invalid email format");
+      }
+      return orderService.getGuestOrders(emailValidation.data, ctx.tenantId);
+    },
   })
 );
 
@@ -116,10 +143,16 @@ builder.mutationField("updateOrderStatus", (t) =>
       input: t.arg({ type: UpdateOrderStatusInput, required: true }),
     },
     authScopes: { manager: true },
-    resolve: async (_parent, { id, input }) =>
-      orderService.updateOrderStatus(
+    resolve: async (_parent, { id, input }, ctx) => {
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      if (!ORDER_STATUSES.includes(input.status as typeof ORDER_STATUSES[number])) {
+        throw new ValidationError(`Invalid order status. Must be one of: ${ORDER_STATUSES.join(", ")}`);
+      }
+      return orderService.updateOrderStatus(
         id,
-        input.status as "pending" | "confirmed" | "cancelled" | "refunded"
-      ),
+        input.status as "pending" | "confirmed" | "cancelled" | "refunded",
+        ctx.tenantId
+      );
+    },
   })
 );

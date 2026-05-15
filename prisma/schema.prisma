@@ -180,7 +180,10 @@ model Product {
   @@unique([tenantId, slug])
   @@unique([tenantId, sku])
   @@index([tenantId, isVisible, isActive])
+  @@index([tenantId, isActive])
+  @@index([tenantId, isVisible])
   @@index([tenantId, name])
+  @@index([tenantId, slug])
 }
 
 model ProductVariant {
@@ -319,10 +322,14 @@ model StockMovement {
   variant ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
 
   @@index([tenantId, branchId, productId])
+  @@index([tenantId, branchId, productId, variantId])
   @@index([tenantId, productId, variantId])
   @@index([tenantId, productId])
   @@index([createdAt])
   @@index([referenceId])
+  @@index([tenantId, branchId, variantId])
+  @@index([branchId])
+  @@index([tenantId, branchId])
 }
 
 // ───────────────────────────────────────────
@@ -351,6 +358,7 @@ model Order {
 
   @@index([tenantId, createdAt])
   @@index([tenantId, customerId])
+  @@index([tenantId, status])
   @@index([guestEmail])
   @@index([paymentId])
 }

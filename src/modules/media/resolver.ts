@@ -1,5 +1,6 @@
 import { builder } from "@graphql/builder";
 import * as mediaService from "./service";
+import { ForbiddenError, ValidationError } from "@lib/errors";
 
 export const ProductImage = builder.prismaObject("ProductImage", {
   fields: (t) => ({
@@ -15,18 +16,18 @@ export const ProductImage = builder.prismaObject("ProductImage", {
 
 const CreateImageInput = builder.inputType("CreateImageInput", {
   fields: (t) => ({
-    productId: t.string(),
-    variantId: t.string(),
-    url: t.string({ required: true }),
-    altText: t.string(),
+    productId: t.string({ maxLength: 64 }),
+    variantId: t.string({ maxLength: 64 }),
+    url: t.string({ required: true, maxLength: 2048 }),
+    altText: t.string({ maxLength: 500 }),
     sortOrder: t.int(),
   }),
 });
 
 const UpdateImageInput = builder.inputType("UpdateImageInput", {
   fields: (t) => ({
-    url: t.string(),
-    altText: t.string(),
+    url: t.string({ maxLength: 2048 }),
+    altText: t.string({ maxLength: 500 }),
     sortOrder: t.int(),
   }),
 });
@@ -36,13 +37,20 @@ builder.mutationField("createImage", (t) =>
     type: ProductImage,
     args: { input: t.arg({ type: CreateImageInput, required: true }) },
     authScopes: { manager: true },
-    resolve: async (_parent, { input }) => mediaService.createImage({
-      ...input,
-      productId: input.productId ?? undefined,
-      variantId: input.variantId ?? undefined,
-      altText: input.altText ?? undefined,
-      sortOrder: input.sortOrder ?? undefined,
-    }),
+    resolve: async (_parent, { input }, ctx) => {
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      if (!input.productId && !input.variantId) {
+        throw new ValidationError("Either productId or variantId is required");
+      }
+      return mediaService.createImage({
+        ...input,
+        tenantId: ctx.tenantId,
+        productId: input.productId ?? undefined,
+        variantId: input.variantId ?? undefined,
+        altText: input.altText ?? undefined,
+        sortOrder: input.sortOrder ?? undefined,
+      });
+    },
   })
 );
 
@@ -54,11 +62,14 @@ builder.mutationField("updateImage", (t) =>
       input: t.arg({ type: UpdateImageInput, required: true }),
     },
     authScopes: { manager: true },
-    resolve: async (_parent, { id, input }) => mediaService.updateImage(id, {
-      url: input.url ?? undefined,
-      altText: input.altText ?? undefined,
-      sortOrder: input.sortOrder ?? undefined,
-    }),
+    resolve: async (_parent, { id, input }, ctx) => {
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      return mediaService.updateImage(id, {
+        url: input.url ?? undefined,
+        altText: input.altText ?? undefined,
+        sortOrder: input.sortOrder ?? undefined,
+      }, ctx.tenantId);
+    },
   })
 );
 
@@ -67,8 +78,9 @@ builder.mutationField("deleteImage", (t) =>
     type: "Boolean",
     args: { id: t.arg.string({ required: true }) },
     authScopes: { manager: true },
-    resolve: async (_parent, { id }) => {
-      await mediaService.deleteImage(id);
+    resolve: async (_parent, { id }, ctx) => {
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      await mediaService.deleteImage(id, ctx.tenantId);
       return true;
     },
   })

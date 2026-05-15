@@ -1,6 +1,8 @@
 import { builder } from "@graphql/builder";
 import * as checkoutService from "./service";
 import { rateLimitCheckout } from "@lib/rate-limit";
+import { ValidationError, ForbiddenError } from "@lib/errors";
+import { emailSchema } from "@lib/validation";
 
 interface CheckoutResultShape {
   preferenceId: string | null | undefined;
@@ -20,9 +22,9 @@ const CheckoutResult = builder.objectRef<CheckoutResultShape>("CheckoutResult").
 
 const CheckoutInput = builder.inputType("CheckoutInput", {
   fields: (t) => ({
-    cartId: t.string({ required: true }),
-    branchId: t.string({ required: true }),
-    guestEmail: t.string(),
+    cartId: t.string({ required: true, maxLength: 64 }),
+    branchId: t.string({ required: true, maxLength: 64 }),
+    guestEmail: t.string({ maxLength: 255 }),
   }),
 });
 
@@ -38,13 +40,21 @@ builder.mutationField("checkout", (t) =>
       const isUserCart = !!ctx.user;
 
       if (process.env.NODE_ENV === "production" && !process.env.FRONTEND_URL) {
-        throw new Error("FRONTEND_URL environment variable is required in production");
+        throw new ValidationError("FRONTEND_URL environment variable is required in production");
       }
 
       const frontendUrl = process.env.FRONTEND_URL ?? "http://localhost:3000";
       const webhookUrl = `${frontendUrl}/webhooks/mercadopago`;
 
-      if (!ctx.tenantId) throw new Error("Tenant ID required");
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+
+      if (input.guestEmail) {
+        const emailResult = emailSchema.safeParse(input.guestEmail);
+        if (!emailResult.success) {
+          throw new ValidationError(emailResult.error.errors[0].message);
+        }
+        input.guestEmail = emailResult.data;
+      }
 
       return checkoutService.createCheckout({
         cartId: input.cartId,

@@ -1,5 +1,7 @@
 import { builder } from "@graphql/builder";
 import * as tenantService from "./service";
+import { ForbiddenError } from "@lib/errors";
+import { rateLimitGeneral } from "@lib/rate-limit";
 
 // ─── Types ───
 
@@ -32,33 +34,33 @@ export const Branch = builder.prismaObject("Branch", {
 
 const CreateTenantInput = builder.inputType("CreateTenantInput", {
   fields: (t) => ({
-    name: t.string({ required: true }),
-    slug: t.string({ required: true }),
-    branchName: t.string(),
+    name: t.string({ required: true, maxLength: 255 }),
+    slug: t.string({ required: true, maxLength: 120 }),
+    branchName: t.string({ maxLength: 255 }),
   }),
 });
 
 const UpdateTenantInput = builder.inputType("UpdateTenantInput", {
   fields: (t) => ({
-    name: t.string(),
+    name: t.string({ maxLength: 255 }),
     isActive: t.boolean(),
   }),
 });
 
 const CreateBranchInput = builder.inputType("CreateBranchInput", {
   fields: (t) => ({
-    tenantId: t.string({ required: true }),
-    name: t.string({ required: true }),
-    address: t.string(),
-    phone: t.string(),
+    tenantId: t.string({ required: true, maxLength: 64 }),
+    name: t.string({ required: true, maxLength: 255 }),
+    address: t.string({ maxLength: 500 }),
+    phone: t.string({ maxLength: 20 }),
   }),
 });
 
 const UpdateBranchInput = builder.inputType("UpdateBranchInput", {
   fields: (t) => ({
-    name: t.string(),
-    address: t.string(),
-    phone: t.string(),
+    name: t.string({ maxLength: 255 }),
+    address: t.string({ maxLength: 500 }),
+    phone: t.string({ maxLength: 20 }),
     isActive: t.boolean(),
   }),
 });
@@ -105,10 +107,17 @@ builder.queryField("tenant", (t) =>
 builder.queryField("branches", (t) =>
   t.field({
     type: [Branch],
+    args: {
+      take: t.arg.int({ defaultValue: 50 }),
+      skip: t.arg.int({ defaultValue: 0 }),
+    },
     authScopes: { manager: true },
-    resolve: async (_parent, _args, ctx) => {
-      if (!ctx.tenantId) throw new Error("Tenant ID required");
-      return tenantService.listBranches(ctx.tenantId);
+    resolve: async (_parent, args, ctx) => {
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      return tenantService.listBranches(ctx.tenantId, {
+        take: args.take ?? 50,
+        skip: args.skip ?? 0,
+      });
     },
   })
 );
@@ -135,10 +144,16 @@ builder.mutationField("updateTenant", (t) =>
       input: t.arg({ type: UpdateTenantInput, required: true }),
     },
     authScopes: { admin: true },
-    resolve: async (_parent, { id, input }) => tenantService.updateTenant(id, {
-      name: input.name ?? undefined,
-      isActive: input.isActive ?? undefined,
-    }),
+    resolve: async (_parent, { id, input }, ctx) => {
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      if (ctx.tenantId !== id) {
+        throw new ForbiddenError("Cannot update another tenant");
+      }
+      return tenantService.updateTenant(id, {
+        name: input.name ?? undefined,
+        isActive: input.isActive ?? undefined,
+      });
+    },
   })
 );
 
@@ -147,11 +162,17 @@ builder.mutationField("createBranch", (t) =>
     type: Branch,
     args: { input: t.arg({ type: CreateBranchInput, required: true }) },
     authScopes: { manager: true },
-    resolve: async (_parent, { input }) => tenantService.createBranch({
-      ...input,
-      address: input.address ?? undefined,
-      phone: input.phone ?? undefined,
-    }),
+    resolve: async (_parent, { input }, ctx) => {
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      if (input.tenantId !== ctx.tenantId) {
+        throw new ForbiddenError("Cannot create branch for another tenant");
+      }
+      return tenantService.createBranch({
+        ...input,
+        address: input.address ?? undefined,
+        phone: input.phone ?? undefined,
+      });
+    },
   })
 );
 
@@ -163,11 +184,14 @@ builder.mutationField("updateBranch", (t) =>
       input: t.arg({ type: UpdateBranchInput, required: true }),
     },
     authScopes: { manager: true },
-    resolve: async (_parent, { id, input }) => tenantService.updateBranch(id, {
-      name: input.name ?? undefined,
-      address: input.address ?? undefined,
-      phone: input.phone ?? undefined,
-      isActive: input.isActive ?? undefined,
-    }),
+    resolve: async (_parent, { id, input }, ctx) => {
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      return tenantService.updateBranch(id, {
+        name: input.name ?? undefined,
+        address: input.address ?? undefined,
+        phone: input.phone ?? undefined,
+        isActive: input.isActive ?? undefined,
+      }, ctx.tenantId);
+    },
   })
 );

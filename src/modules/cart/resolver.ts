@@ -1,5 +1,7 @@
 import { builder } from "@graphql/builder";
 import * as cartService from "./service";
+import { AuthenticationError, ValidationError } from "@lib/errors";
+import { rateLimitGeneral } from "@lib/rate-limit";
 
 // ─── Types ───
 
@@ -58,21 +60,21 @@ const StockValidationResult = builder.objectRef<StockValidationResultShape>("Sto
 
 const AddToCartInput = builder.inputType("AddToCartInput", {
   fields: (t) => ({
-    cartId: t.string(),
-    productId: t.string({ required: true }),
-    variantId: t.string(),
-    name: t.string({ required: true }),
+    cartId: t.string({ maxLength: 64 }),
+    productId: t.string({ required: true, maxLength: 64 }),
+    variantId: t.string({ maxLength: 64 }),
+    name: t.string({ required: true, maxLength: 255 }),
     price: t.float({ required: true }),
-    quantity: t.int({ required: true }),
-    imageUrl: t.string(),
+    quantity: t.int({ required: true, minValue: 1 }),
+    imageUrl: t.string({ maxLength: 2048 }),
   }),
 });
 
 const UpdateCartItemInput = builder.inputType("UpdateCartItemInput", {
   fields: (t) => ({
-    productId: t.string({ required: true }),
-    variantId: t.string(),
-    quantity: t.int({ required: true }),
+    productId: t.string({ required: true, maxLength: 64 }),
+    variantId: t.string({ maxLength: 64 }),
+    quantity: t.int({ required: true, minValue: 0 }),
   }),
 });
 
@@ -83,7 +85,15 @@ builder.queryField("cart", (t) =>
     type: Cart,
     args: { cartId: t.arg.string({ required: true }) },
     authScopes: { public: true },
-    resolve: async (_parent, args) => cartService.getGuestCart(args.cartId),
+    resolve: async (_parent, args, ctx) => {
+      const cartId = args.cartId;
+      if (!cartId || cartId.length < 10 || cartId.length > 100) {
+        throw new ValidationError("Invalid cart ID format");
+      }
+      const isUserCart = !!ctx.user;
+      const tenantId = ctx.tenantId ?? "";
+      return cartService.getGuestCart(cartId, tenantId, isUserCart);
+    },
   })
 );
 
@@ -92,8 +102,9 @@ builder.queryField("myCart", (t) =>
     type: Cart,
     authScopes: { customer: true },
     resolve: async (_parent, _args, ctx) => {
-      if (!ctx.user) throw new Error("Unauthorized");
-      return cartService.getUserCart(ctx.user.id);
+      if (!ctx.user) throw new AuthenticationError("Unauthorized");
+      const tenantId = ctx.tenantId ?? "";
+      return cartService.getUserCart(ctx.user.id, tenantId);
     },
   })
 );
@@ -104,7 +115,10 @@ builder.mutationField("createCart", (t) =>
   t.field({
     type: "String",
     authScopes: { public: true },
-    resolve: async () => cartService.createGuestCart(),
+    resolve: async (_parent, _args, ctx) => {
+      const tenantId = ctx.tenantId ?? "";
+      return cartService.createGuestCart(tenantId);
+    },
   })
 );
 
@@ -114,9 +128,18 @@ builder.mutationField("addToCart", (t) =>
     args: { input: t.arg({ type: AddToCartInput, required: true }) },
     authScopes: { public: true },
     resolve: async (_parent, { input }, ctx) => {
+      const identifier = ctx.user?.id ?? ctx.req.ip ?? "anonymous";
+      await rateLimitGeneral(`addToCart:${identifier}`);
+      if (input.price < 0) {
+        throw new ValidationError("Price cannot be negative");
+      }
+      if (input.quantity <= 0) {
+        throw new ValidationError("Quantity must be positive");
+      }
       const isUserCart = !!ctx.user;
       const cartId = input.cartId ?? ctx.user?.id;
-      if (!cartId) throw new Error("Cart ID required");
+      if (!cartId) throw new ValidationError("Cart ID required");
+      const tenantId = ctx.tenantId ?? "";
 
       return cartService.addToCart(
         cartId,
@@ -128,7 +151,8 @@ builder.mutationField("addToCart", (t) =>
           quantity: input.quantity,
           imageUrl: input.imageUrl ?? null,
         },
-        isUserCart
+        isUserCart,
+        tenantId
       );
     },
   })
@@ -143,13 +167,17 @@ builder.mutationField("updateCartItem", (t) =>
     },
     authScopes: { public: true },
     resolve: async (_parent, { cartId, input }, ctx) => {
+      const identifier = ctx.user?.id ?? ctx.req.ip ?? "anonymous";
+      await rateLimitGeneral(`updateCartItem:${identifier}`);
       const isUserCart = cartId.startsWith("user:") || !!ctx.user;
+      const tenantId = ctx.tenantId ?? "";
       return cartService.updateCartItem(
         cartId,
         input.productId,
         input.quantity,
         input.variantId ?? null,
-        isUserCart
+        isUserCart,
+        tenantId
       );
     },
   })
@@ -165,8 +193,11 @@ builder.mutationField("removeFromCart", (t) =>
     },
     authScopes: { public: true },
     resolve: async (_parent, { cartId, productId, variantId }, ctx) => {
+      const identifier = ctx.user?.id ?? ctx.req.ip ?? "anonymous";
+      await rateLimitGeneral(`removeFromCart:${identifier}`);
       const isUserCart = cartId.startsWith("user:") || !!ctx.user;
-      return cartService.removeFromCart(cartId, productId, variantId ?? null, isUserCart);
+      const tenantId = ctx.tenantId ?? "";
+      return cartService.removeFromCart(cartId, productId, variantId ?? null, isUserCart, tenantId);
     },
   })
 );
@@ -177,8 +208,11 @@ builder.mutationField("clearCart", (t) =>
     args: { cartId: t.arg.string({ required: true }) },
     authScopes: { public: true },
     resolve: async (_parent, { cartId }, ctx) => {
+      const identifier = ctx.user?.id ?? ctx.req.ip ?? "anonymous";
+      await rateLimitGeneral(`clearCart:${identifier}`);
       const isUserCart = cartId.startsWith("user:") || !!ctx.user;
-      await cartService.clearCart(cartId, isUserCart);
+      const tenantId = ctx.tenantId ?? "";
+      await cartService.clearCart(cartId, tenantId, isUserCart);
       return true;
     },
   })
@@ -190,8 +224,9 @@ builder.mutationField("mergeCart", (t) =>
     args: { guestCartId: t.arg.string({ required: true }) },
     authScopes: { customer: true },
     resolve: async (_parent, { guestCartId }, ctx) => {
-      if (!ctx.user) throw new Error("Unauthorized");
-      return cartService.mergeGuestCartIntoUserCart(guestCartId, ctx.user.id);
+      if (!ctx.user) throw new AuthenticationError("Unauthorized");
+      const tenantId = ctx.tenantId ?? "";
+      return cartService.mergeGuestCartIntoUserCart(guestCartId, ctx.user.id, tenantId);
     },
   })
 );
@@ -204,8 +239,9 @@ builder.queryField("validateCartStock", (t) =>
       branchId: t.arg.string({ required: true }),
     },
     authScopes: { public: true },
-    resolve: async (_parent, { cartId, branchId }) => {
-      const cart = await cartService.getGuestCart(cartId);
+    resolve: async (_parent, { cartId, branchId }, ctx) => {
+      const tenantId = ctx.tenantId ?? "";
+      const cart = await cartService.getGuestCart(cartId, tenantId);
       return cartService.validateCartStock(cart, branchId);
     },
   })

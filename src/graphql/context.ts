@@ -1,6 +1,9 @@
 import type { Request } from "express";
+import DataLoader from "dataloader";
 import { verifyToken, type TokenPayload } from "@lib/jwt";
 import { getTenantId } from "@lib/tenant-context";
+import { logger } from "@lib/logger";
+import { getBatchStockCached, type BatchStockKey } from "@lib/cache";
 
 export interface UserContext {
   id: string;
@@ -13,14 +16,15 @@ export interface Context {
   req: Request;
   user: UserContext | null;
   tenantId: string | null;
+  stockLoader: DataLoader<BatchStockKey, number | null, string>;
 }
 
 function extractToken(req: Request): string | null {
   const auth = req.headers.authorization;
   if (!auth) return null;
-  const [scheme, token] = auth.split(" ");
-  if (scheme !== "Bearer" || !token) return null;
-  return token;
+  const parts = auth.split(" ");
+  if (parts.length !== 2 || parts[0] !== "Bearer" || !parts[1]) return null;
+  return parts[1];
 }
 
 function buildUserContext(payload: TokenPayload): UserContext {
@@ -47,8 +51,9 @@ export async function createContext({ req }: { req: Request }): Promise<Context>
     try {
       const payload = await verifyToken(token);
       user = buildUserContext(payload);
-    } catch {
+    } catch (err) {
       user = null;
+      logger.debug({ component: "auth" }, "Token verification failed");
     }
   }
 
@@ -61,5 +66,13 @@ export async function createContext({ req }: { req: Request }): Promise<Context>
     tenantId = headerTenantId ?? getTenantId() ?? null;
   }
 
-  return { req, user, tenantId };
+  const stockLoader = new DataLoader<BatchStockKey, number | null, string>(
+    async (keys: readonly BatchStockKey[]) => {
+      const results = await getBatchStockCached([...keys]);
+      return results;
+    },
+    { maxBatchSize: 100, cacheKeyFn: (k: BatchStockKey) => `${k.tenantId}:${k.productId}:${k.branchId}:${k.variantId ?? "base"}` }
+  );
+
+  return { req, user, tenantId, stockLoader };
 }

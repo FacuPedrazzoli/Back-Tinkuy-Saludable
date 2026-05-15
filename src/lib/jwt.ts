@@ -2,9 +2,7 @@ import jwt from "jsonwebtoken";
 import { redis, isRedisAvailable } from "./redis";
 import { AuthenticationError } from "./errors";
 import { AppError } from "./errors";
-
-const ADMIN_SECRET = process.env.JWT_ADMIN_SECRET ?? "";
-const CUSTOMER_SECRET = process.env.JWT_CUSTOMER_SECRET ?? "";
+import { logger } from "./logger";
 
 const TOKEN_BLACKLIST_PREFIX = "jwt:blacklist:";
 const TOKEN_BLACKLIST_TTL = 86400;
@@ -17,6 +15,16 @@ export function validateSecrets(): void {
     throw new AppError("BOOTSTRAP_ERROR", errors.join("; "), 500);
   }
 }
+
+function getJwtSecret(name: string, value: string | undefined): string {
+  if (!value) {
+    throw new AppError("CONFIG_ERROR", `Missing required environment variable: ${name}`, 500);
+  }
+  return value;
+}
+
+export const validatedAdminSecret = getJwtSecret("JWT_ADMIN_SECRET", ADMIN_SECRET);
+export const validatedCustomerSecret = getJwtSecret("JWT_CUSTOMER_SECRET", CUSTOMER_SECRET);
 
 export interface AdminTokenPayload {
   sub: string; // adminUserId
@@ -34,19 +42,17 @@ export interface CustomerTokenPayload {
 export type TokenPayload = AdminTokenPayload | CustomerTokenPayload;
 
 export function signAdminToken(payload: AdminTokenPayload): string {
-  if (!ADMIN_SECRET) throw new Error("JWT_ADMIN_SECRET not configured");
-  return jwt.sign(payload, ADMIN_SECRET, { expiresIn: "24h" });
+  return jwt.sign(payload, validatedAdminSecret, { expiresIn: "24h" });
 }
 
 export function signCustomerToken(payload: CustomerTokenPayload): string {
-  if (!CUSTOMER_SECRET) throw new Error("JWT_CUSTOMER_SECRET not configured");
-  return jwt.sign(payload, CUSTOMER_SECRET, { expiresIn: "7d" });
+  return jwt.sign(payload, validatedCustomerSecret, { expiresIn: "7d" });
 }
 
 export async function revokeToken(token: string): Promise<void> {
   const available = await isRedisAvailable();
   if (!available) {
-    console.warn("Redis unavailable, token revocation skipped");
+    logger.warn({ component: "auth" }, "Redis unavailable, token revocation skipped");
     return;
   }
   const key = TOKEN_BLACKLIST_PREFIX + token;
@@ -68,18 +74,14 @@ export async function verifyToken(token: string): Promise<TokenPayload> {
   }
 
   const secrets = [
-    { secret: ADMIN_SECRET, roles: ["admin", "manager"] as const },
-    { secret: CUSTOMER_SECRET, roles: ["customer"] as const },
-  ].filter((s) => s.secret);
-
-  if (secrets.length === 0) {
-    throw new AuthenticationError("No JWT secrets configured");
-  }
+    { secret: validatedAdminSecret, roles: ["admin", "manager"] as const },
+    { secret: validatedCustomerSecret, roles: ["customer"] as const },
+  ];
 
   const errors: string[] = [];
   for (const { secret, roles } of secrets) {
     try {
-      const payload = jwt.verify(token, secret) as TokenPayload;
+      const payload = jwt.verify(token, secret, { algorithms: ["HS256"] }) as TokenPayload;
       if ((roles as readonly string[]).includes(payload.role)) {
         return payload;
       }

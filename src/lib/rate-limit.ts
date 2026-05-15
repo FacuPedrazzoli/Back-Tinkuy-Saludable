@@ -1,28 +1,25 @@
 import { redis } from "./redis";
 import { RateLimitError } from "./errors";
+import { config } from "./config";
 
-interface RateLimitConfig {
+type RateLimitConfig = {
   windowMs: number;
   maxRequests: number;
-}
-
-const DEFAULT_GENERAL: RateLimitConfig = {
-  windowMs: 60 * 1000, // 1 minute
-  maxRequests: 100,
 };
 
-const DEFAULT_AUTH: RateLimitConfig = {
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  maxRequests: 10,
-};
+const DEFAULT_GENERAL: RateLimitConfig = config.rateLimit.general;
 
-const DEFAULT_CHECKOUT: RateLimitConfig = {
-  windowMs: 60 * 1000, // 1 minute
-  maxRequests: 10,
-};
+const DEFAULT_AUTH: RateLimitConfig = config.rateLimit.auth;
 
-const FALLBACK_MEMORY_LIMIT = 10;
+const DEFAULT_CHECKOUT: RateLimitConfig = config.rateLimit.checkout;
+
+const FALLBACK_MEMORY_LIMIT = config.rateLimit.fallbackMemoryLimit;
+const MAX_MEMORY_FALLBACK_ENTRIES = 1000;
 const memoryFallback = new Map<string, { count: number; resetAt: number }>();
+
+setInterval(() => {
+  memoryFallbackCleanup();
+}, 60000);
 
 export async function checkRedis(): Promise<boolean> {
   try {
@@ -40,6 +37,9 @@ export async function rateLimit(
   const isRedisAvailableNow = await checkRedis();
 
   if (!isRedisAvailableNow) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new RateLimitError('Service temporarily unavailable');
+    }
     memoryFallbackCleanup();
     const entry = memoryFallback.get(key);
     const now = Date.now();
@@ -75,8 +75,19 @@ export async function rateLimit(
 
 function memoryFallbackCleanup(): void {
   const now = Date.now();
+  const keysToDelete: string[] = [];
   for (const [key, entry] of memoryFallback.entries()) {
     if (entry.resetAt <= now) {
+      keysToDelete.push(key);
+    }
+  }
+  for (const key of keysToDelete) {
+    memoryFallback.delete(key);
+  }
+  if (memoryFallback.size > MAX_MEMORY_FALLBACK_ENTRIES) {
+    const sortedEntries = [...memoryFallback.entries()].sort((a, b) => a[1].resetAt - b[1].resetAt);
+    const toRemove = sortedEntries.slice(0, sortedEntries.length - MAX_MEMORY_FALLBACK_ENTRIES);
+    for (const [key] of toRemove) {
       memoryFallback.delete(key);
     }
   }

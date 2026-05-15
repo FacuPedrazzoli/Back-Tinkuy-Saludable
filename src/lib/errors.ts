@@ -1,4 +1,5 @@
 import { GraphQLError, type GraphQLFormattedError } from "graphql";
+import { logger } from "./logger";
 
 export class AppError extends Error {
   constructor(
@@ -56,6 +57,11 @@ export function formatError(
   const original = graphqlError.originalError;
 
   if (original instanceof AppError) {
+    if (original.statusCode >= 500) {
+      logger.error({ err: original, code: original.code }, "Server error occurred");
+    } else if (original.statusCode >= 400) {
+      logger.warn({ err: original, code: original.code }, "Client error occurred");
+    }
     return {
       ...formattedError,
       message: original.message,
@@ -66,6 +72,8 @@ export function formatError(
       },
     };
   }
+
+  logger.error({ err: error }, "Unhandled GraphQL error");
 
   if (process.env.NODE_ENV === "production") {
     return {

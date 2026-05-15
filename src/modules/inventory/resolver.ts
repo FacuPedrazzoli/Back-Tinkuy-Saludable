@@ -1,5 +1,6 @@
 import { builder } from "@graphql/builder";
 import * as inventoryService from "./service";
+import { ForbiddenError, ValidationError } from "@lib/errors";
 
 export const StockMovement = builder.prismaObject("StockMovement", {
   fields: (t) => ({
@@ -15,15 +16,17 @@ export const StockMovement = builder.prismaObject("StockMovement", {
   }),
 });
 
+const STOCK_MOVEMENT_TYPES = ["INBOUND", "OUTBOUND", "ADJUSTMENT", "TRANSFER"] as const;
+
 const CreateStockMovementInput = builder.inputType("CreateStockMovementInput", {
   fields: (t) => ({
-    branchId: t.string({ required: true }),
-    productId: t.string({ required: true }),
-    variantId: t.string(),
+    branchId: t.string({ required: true, maxLength: 64 }),
+    productId: t.string({ required: true, maxLength: 64 }),
+    variantId: t.string({ maxLength: 64 }),
     type: t.string({ required: true }),
-    quantity: t.int({ required: true }),
-    reason: t.string(),
-    referenceId: t.string(),
+    quantity: t.int({ required: true, minValue: 1, maxValue: 1000000 }),
+    reason: t.string({ maxLength: 500 }),
+    referenceId: t.string({ maxLength: 64 }),
   }),
 });
 
@@ -49,12 +52,15 @@ builder.queryField("stockMovements", (t) =>
       branchId: t.arg.string(),
       productId: t.arg.string(),
       variantId: t.arg.string(),
-      take: t.arg.int({ defaultValue: 20 }),
-      skip: t.arg.int({ defaultValue: 0 }),
+      take: t.arg.int({ defaultValue: 20, description: "Maximum number of records to return" }),
+      skip: t.arg.int({ defaultValue: 0, description: "Number of records to skip" }),
     },
     authScopes: { manager: true },
     resolve: async (_parent, args, ctx) => {
-      if (!ctx.tenantId) throw new Error("Tenant ID required");
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      if (args.take > 100) {
+        throw new ValidationError("Take cannot exceed 100");
+      }
       return inventoryService.listStockMovements({
         tenantId: ctx.tenantId,
         branchId: args.branchId ?? undefined,
@@ -77,7 +83,7 @@ builder.queryField("stock", (t) =>
     },
     authScopes: { manager: true },
     resolve: async (_parent, args, ctx) => {
-      if (!ctx.tenantId) throw new Error("Tenant ID required");
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
       return inventoryService.getStock({
         tenantId: ctx.tenantId,
         branchId: args.branchId,
@@ -94,7 +100,10 @@ builder.mutationField("createStockMovement", (t) =>
     args: { input: t.arg({ type: CreateStockMovementInput, required: true }) },
     authScopes: { manager: true },
     resolve: async (_parent, { input }, ctx) => {
-      if (!ctx.tenantId) throw new Error("Tenant ID required");
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      if (!STOCK_MOVEMENT_TYPES.includes(input.type as typeof STOCK_MOVEMENT_TYPES[number])) {
+        throw new ValidationError(`Invalid stock movement type. Must be one of: ${STOCK_MOVEMENT_TYPES.join(", ")}`);
+      }
       return inventoryService.createStockMovement({
         ...input,
         tenantId: ctx.tenantId,
@@ -102,6 +111,7 @@ builder.mutationField("createStockMovement", (t) =>
         variantId: input.variantId ?? undefined,
         reason: input.reason ?? undefined,
         referenceId: input.referenceId ?? undefined,
+        validateBranchOwnership: true,
       });
     },
   })

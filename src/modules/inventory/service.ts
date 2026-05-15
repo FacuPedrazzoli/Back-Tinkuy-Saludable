@@ -1,6 +1,7 @@
 import { prisma } from "@lib/prisma";
-import { ValidationError } from "@lib/errors";
+import { ValidationError, NotFoundError, ForbiddenError } from "@lib/errors";
 import { invalidateStockCache } from "@lib/cache";
+import { Prisma } from "@prisma/client";
 
 export async function createStockMovement(input: {
   tenantId: string;
@@ -11,6 +12,7 @@ export async function createStockMovement(input: {
   quantity: number;
   reason?: string | null;
   referenceId?: string | null;
+  validateBranchOwnership?: boolean;
 }) {
   if (input.quantity <= 0) {
     throw new ValidationError("Quantity must be positive");
@@ -19,7 +21,16 @@ export async function createStockMovement(input: {
     throw new ValidationError("Quantity exceeds maximum allowed (1000000)");
   }
 
-  return prisma.$transaction(async (tx) => {
+  if (input.validateBranchOwnership !== false) {
+    const branch = await prisma.branch.findUnique({
+      where: { id: input.branchId },
+      select: { tenantId: true },
+    });
+    if (!branch) throw new NotFoundError("Branch");
+    if (branch.tenantId !== input.tenantId) throw new ForbiddenError("Branch does not belong to this tenant");
+  }
+
+  const movement = await prisma.$transaction(async (tx) => {
     if (input.type === "OUTBOUND") {
       const currentStock = await tx.$queryRaw<{ total: bigint }[]>`
         SELECT COALESCE(SUM(quantity), 0) as total
@@ -38,7 +49,7 @@ export async function createStockMovement(input: {
       }
     }
 
-    const movement = await tx.stockMovement.create({
+    return tx.stockMovement.create({
       data: {
         tenantId: input.tenantId,
         branchId: input.branchId,
@@ -51,14 +62,13 @@ export async function createStockMovement(input: {
         referenceId: input.referenceId,
       },
     });
-
-    return movement;
   }, {
     isolationLevel: "Serializable",
-  }).then(async (movement) => {
-    await invalidateStockCache(input.productId, input.branchId, input.variantId);
-    return movement;
   });
+
+  await invalidateStockCache(input.productId, input.branchId, input.variantId, input.tenantId);
+
+  return movement;
 }
 
 export async function listStockMovements(args: {
@@ -69,7 +79,7 @@ export async function listStockMovements(args: {
   take?: number;
   skip?: number;
 }) {
-  const where: any = { tenantId: args.tenantId };
+  const where: Prisma.StockMovementWhereInput = { tenantId: args.tenantId };
   if (args.branchId) where.branchId = args.branchId;
   if (args.productId) where.productId = args.productId;
   if (args.variantId) where.variantId = args.variantId;
@@ -107,10 +117,10 @@ export async function getStock(args: {
   return result._sum.quantity ?? 0;
 }
 
-export async function getProductStockAllBranches(productId: string) {
+export async function getProductStockAllBranches(productId: string, tenantId: string) {
   const movements = await prisma.stockMovement.groupBy({
     by: ["branchId"],
-    where: { productId },
+    where: { productId, tenantId },
     _sum: { quantity: true },
   });
 

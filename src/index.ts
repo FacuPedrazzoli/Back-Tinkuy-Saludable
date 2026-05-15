@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
+import compression from "compression";
 import timeout from "connect-timeout";
 import { ApolloServer } from "@apollo/server";
 import { expressMiddleware } from "@apollo/server/express4";
@@ -13,9 +14,13 @@ import { redis, pingRedis } from "@lib/redis";
 import { rateLimitGeneral } from "@lib/rate-limit";
 import { handleWebhook } from "@modules/checkout/webhook.handler";
 import { runWithTenantSync } from "@lib/tenant-context";
-import { validateSecrets } from "@lib/jwt";
+import { validateSecrets, validatedAdminSecret, validatedCustomerSecret } from "@lib/jwt";
+import { validateConfig } from "@lib/config";
 import jwt from "jsonwebtoken";
 import { depthLimitPlugin } from "@graphql/plugins/depth-limit";
+import { logger } from "@lib/logger";
+import { requestLoggingMiddleware } from "@lib/request-logger";
+import { getMetricsSummary, getMetrics } from "@lib/metrics";
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 4000;
@@ -30,14 +35,53 @@ if (trustProxy !== undefined) {
   }
 }
 
-if (!process.env.FRONTEND_URL && process.env.NODE_ENV === "production") {
-  console.error("FRONTEND_URL environment variable is required in production");
-  process.exit(1);
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" },
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'"],
+      imgSrc: ["'self'", "data:", "https:"],
+      connectSrc: ["'self'"],
+      fontSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      mediaSrc: ["'self'"],
+      frameSrc: ["'none'"],
+    },
+  },
+  xContentTypeOptions: true,
+  xFrameOptions: "DENY",
+  strictTransportSecurity: {
+    maxAge: 31536000,
+    includeSubDomains: true,
+    preload: true,
+  },
+  referrerPolicy: { policy: "strict-origin-when-cross-origin" },
+}));
+const corsOptions: cors.CorsOptions = {
+  origin: false,
+  credentials: false,
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "x-tenant-id"],
+  maxAge: 86400,
+};
+
+if (process.env.FRONTEND_URL) {
+  corsOptions.origin = process.env.FRONTEND_URL;
+  corsOptions.credentials = true;
 }
 
-app.use(helmet());
-app.use(cors({ origin: process.env.FRONTEND_URL }));
+app.use(cors(corsOptions));
+app.use(compression());
 app.use(timeout('30s'));
+app.use(requestLoggingMiddleware);
+
+app.use((req, res) => {
+  if (req.timedout && !res.headersSent) {
+    res.status(408).json({ error: "Request timeout" });
+  }
+});
 
 app.use((req, _res, next) => {
   let tenantId: string | null = null;
@@ -47,18 +91,33 @@ app.use((req, _res, next) => {
     const [scheme, token] = auth.split(" ");
     if (scheme === "Bearer" && token) {
       try {
-        const decoded = jwt.decode(token) as { tenantId?: string } | null;
-        if (decoded?.tenantId) {
+        const secrets = [
+          { secret: validatedAdminSecret },
+          { secret: validatedCustomerSecret },
+        ];
+        let decoded: { tenantId?: string } | null = null;
+        for (const { secret } of secrets) {
+          try {
+            decoded = jwt.verify(token, secret, { algorithms: ["HS256"] }) as { tenantId?: string } | null;
+            break;
+          } catch {
+            // try next secret
+          }
+        }
+        if (decoded?.tenantId && typeof decoded.tenantId === "string" && decoded.tenantId.length > 0 && decoded.tenantId.length <= 64) {
           tenantId = decoded.tenantId;
         }
       } catch {
-        // invalid token format, ignore
+        // Token inválido, no establecer tenantId
       }
     }
   }
 
   if (!tenantId) {
-    tenantId = (req.headers["x-tenant-id"] as string | undefined) ?? null;
+    const headerTenantId = req.headers["x-tenant-id"] as string | undefined;
+    if (headerTenantId && typeof headerTenantId === "string" && headerTenantId.length > 0 && headerTenantId.length <= 64) {
+      tenantId = headerTenantId;
+    }
   }
 
   if (tenantId) {
@@ -72,15 +131,30 @@ app.use(express.json());
 
 // Health check
 app.get("/health", async (_req, res) => {
-  const dbHealthy = await prisma.$queryRaw`SELECT 1`.then(() => true).catch(() => false);
-  const redisHealthy = await pingRedis();
-  const status = dbHealthy && redisHealthy ? 200 : 503;
-  res.status(status).json({
-    status: status === 200 ? "ok" : "degraded",
-    database: dbHealthy ? "connected" : "disconnected",
-    redis: redisHealthy ? "connected" : "disconnected",
-    timestamp: new Date().toISOString(),
-  });
+  try {
+    const dbHealthy = await prisma.$queryRaw`SELECT 1`.then(() => true).catch(() => false);
+    const redisHealthy = await pingRedis();
+    const status = dbHealthy && redisHealthy ? 200 : 503;
+    res.status(status).json({
+      status: status === 200 ? "ok" : "degraded",
+      database: dbHealthy ? "connected" : "disconnected",
+      redis: redisHealthy ? "connected" : "disconnected",
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    logger.error({ err, component: "health" }, "Health check failed");
+    res.status(503).json({
+      status: "error",
+      database: "unknown",
+      redis: "unknown",
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+app.get("/metrics", (_req, res) => {
+  const metrics = getMetrics();
+  res.json(metrics);
 });
 
 // MercadoPago webhook
@@ -100,14 +174,16 @@ app.post(
 );
 
 async function bootstrap() {
+  validateConfig();
+  logger.info({ component: "bootstrap" }, "Configuration validated");
+
   validateSecrets();
-  console.log("✅ JWT secrets validated");
+  logger.info({ component: "bootstrap" }, "JWT secrets validated");
 
-  // Verify database connection
   await prisma.$connect();
-  console.log("✅ Database connected");
+  logger.info({ component: "bootstrap" }, "Database connected");
 
-  const server = new ApolloServer({
+  server = new ApolloServer({
     schema,
     formatError,
     introspection: process.env.NODE_ENV === "production",
@@ -115,40 +191,80 @@ async function bootstrap() {
   });
 
   await server.start();
+  logger.info({ component: "bootstrap" }, "Apollo Server started");
 
   app.use(
     "/graphql",
     express.json(),
+    async (req, _res, next) => {
+      try {
+        const identifier = req.ip ?? req.socket.remoteAddress ?? "anonymous";
+        await rateLimitGeneral(`graphql:${identifier}`);
+        next();
+      } catch (err) {
+        next(err);
+      }
+    },
     expressMiddleware(server, {
       context: async ({ req }) => createContext({ req }),
     })
   );
 
   app.listen(PORT, () => {
-    console.log(`🚀 Server ready at http://localhost:${PORT}`);
-    console.log(`📊 GraphQL endpoint: http://localhost:${PORT}/graphql`);
-    console.log(`💓 Health check: http://localhost:${PORT}/health`);
+    logger.info(
+      { component: "server", port: PORT },
+      `Server ready at http://localhost:${PORT}`
+    );
+    logger.info(
+      { component: "server", endpoint: `/graphql` },
+      `GraphQL endpoint: http://localhost:${PORT}/graphql`
+    );
+    logger.info(
+      { component: "server", endpoint: `/health` },
+      `Health check: http://localhost:${PORT}/health`
+    );
+    logger.info(
+      { component: "server", endpoint: `/metrics` },
+      `Metrics endpoint: http://localhost:${PORT}/metrics`
+    );
+
+    setInterval(() => {
+      getMetricsSummary();
+    }, 60000);
   });
 }
 
 bootstrap().catch((err) => {
-  console.error("Bootstrap failed:", err);
+  logger.fatal({ err, component: "bootstrap" }, "Bootstrap failed");
   process.exit(1);
 });
 
-// Graceful shutdown
 process.on("SIGTERM", async () => {
-  console.log("SIGTERM received, shutting down gracefully");
-  setTimeout(() => process.exit(1), 10000);
+  logger.info({ component: "shutdown" }, "SIGTERM received, shutting down gracefully");
+  getMetricsSummary();
+  if (server) await server.stop();
   await prisma.$disconnect();
   await redis.quit();
+  logger.info({ component: "shutdown" }, "Graceful shutdown completed");
   process.exit(0);
 });
 
 process.on("SIGINT", async () => {
-  console.log("SIGINT received, shutting down gracefully");
-  setTimeout(() => process.exit(1), 10000);
+  logger.info({ component: "shutdown" }, "SIGINT received, shutting down gracefully");
+  getMetricsSummary();
+  if (server) await server.stop();
   await prisma.$disconnect();
   await redis.quit();
+  logger.info({ component: "shutdown" }, "Graceful shutdown completed");
   process.exit(0);
+});
+
+process.on("unhandledRejection", (reason, _promise) => {
+  const message = reason instanceof Error ? reason.message : String(reason);
+  logger.error({ reason: message, component: "process" }, "Unhandled Rejection");
+});
+
+process.on("uncaughtException", (err) => {
+  logger.fatal({ err, component: "process" }, "Uncaught Exception");
+  process.exit(1);
 });

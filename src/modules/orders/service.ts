@@ -1,9 +1,16 @@
 import { prisma } from "@lib/prisma";
 import { NotFoundError, ValidationError } from "@lib/errors";
 import { invalidateStockCache } from "@lib/cache";
+import { queryCache, ORDER_CACHE_TTL } from "@lib/query-cache";
 import { Prisma } from "@prisma/client";
 
 type OrderStatus = "pending" | "confirmed" | "cancelled" | "refunded";
+
+const ORDER_STATUSES: OrderStatus[] = ["pending", "confirmed", "cancelled", "refunded"];
+
+function isOrderStatus(status: string): status is OrderStatus {
+  return ORDER_STATUSES.includes(status as OrderStatus);
+}
 
 const VALID_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   pending: ["confirmed", "cancelled"],
@@ -42,18 +49,28 @@ export async function createOrderFromCheckout(input: {
       );
     }
 
-    for (const item of input.items) {
-      const currentStockResult = await tx.$queryRaw<{ total: bigint }[]>`
-        SELECT COALESCE(SUM(quantity), 0) as total
-        FROM "StockMovement"
-        WHERE "tenantId" = ${input.tenantId}
-          AND "branchId" = ${input.branchId}
-          AND "productId" = ${item.productId}
-          AND ("variantId" = ${item.variantId} OR (${item.variantId} IS NULL AND "variantId" IS NULL))
-        FOR UPDATE
-      `;
-      const currentStock = Number(currentStockResult[0]?.total ?? 0);
+    const productIdsArr = input.items.map((i) => i.productId);
+    const variantIdsArr = input.items.map((i) => i.variantId ?? "null");
 
+    const stockResults = await tx.$queryRaw<{ productId: string; variantId: string | null; total: bigint }[]>`
+      SELECT "productId", "variantId", COALESCE(SUM(quantity), 0) as total
+      FROM "StockMovement"
+      WHERE "tenantId" = ${input.tenantId}
+        AND "branchId" = ${input.branchId}
+        AND ("productId", COALESCE("variantId"::text, 'null')) IN (
+          SELECT productId, variantId FROM UNNEST(${productIdsArr}, ${variantIdsArr}) AS t(productId, variantId)
+        )
+      GROUP BY "productId", "variantId"
+      FOR UPDATE
+    `;
+
+    const stockMap = new Map<string, bigint>();
+    for (const r of stockResults) {
+      stockMap.set(`${r.productId}:${r.variantId ?? "null"}`, r.total);
+    }
+
+    for (const item of input.items) {
+      const currentStock = Number(stockMap.get(`${item.productId}:${item.variantId ?? "null"}`) ?? 0);
       if (currentStock < item.quantity) {
         throw new ValidationError(
           `Insufficient stock for ${item.name}: available ${currentStock}, requested ${item.quantity}`
@@ -87,28 +104,34 @@ export async function createOrderFromCheckout(input: {
       include: { items: true, customer: true, branch: true },
     });
 
-    for (const item of input.items) {
-      await tx.stockMovement.create({
-        data: {
-          tenantId: input.tenantId,
-          branchId: input.branchId,
-          productId: item.productId,
-          variantId: item.variantId,
-          type: "OUTBOUND",
-          quantity: -item.quantity,
-          reason: `Order ${order.id}`,
-          referenceId: order.id,
-        },
-      });
+    const stockMovementData = input.items.map((item) => ({
+      tenantId: input.tenantId,
+      branchId: input.branchId,
+      productId: item.productId,
+      variantId: item.variantId,
+      type: "OUTBOUND" as const,
+      quantity: -item.quantity,
+      reason: `Order ${order.id}`,
+      referenceId: order.id,
+    }));
 
-      await invalidateStockCache(item.productId, input.branchId, item.variantId);
-    }
+    await tx.stockMovement.createMany({ data: stockMovementData });
+
+    await Promise.all(
+      input.items.map((item) => invalidateStockCache(item.productId, input.branchId, item.variantId, input.tenantId))
+    );
+
+    await queryCache.invalidatePattern(`orders:list:${input.tenantId}:*`);
 
     return order;
   });
 }
 
 export async function getOrder(id: string, tenantId: string) {
+  const cacheKey = `order:${id}:${tenantId}`;
+  const cached = await queryCache.get<NonNullable<ReturnType<typeof prisma.order.findUnique>>>(cacheKey);
+  if (cached) return cached;
+
   const order = await prisma.order.findUnique({
     where: { id, tenantId },
     include: {
@@ -118,6 +141,8 @@ export async function getOrder(id: string, tenantId: string) {
     },
   });
   if (!order) throw new NotFoundError("Order");
+
+  await queryCache.set(cacheKey, order, { ttlSeconds: ORDER_CACHE_TTL });
   return order;
 }
 
@@ -131,6 +156,10 @@ export async function listOrders(args: {
   const where: Prisma.OrderWhereInput = { tenantId: args.tenantId };
   if (args.customerId) where.customerId = args.customerId;
   if (args.status) where.status = args.status;
+
+  const cacheKey = `orders:list:${args.tenantId}:${args.customerId ?? "all"}:${args.status ?? "all"}:${args.take ?? 20}:${args.skip ?? 0}`;
+  const cached = await queryCache.get<{ items: NonNullable<ReturnType<typeof prisma.order.findMany>>; count: number }>(cacheKey);
+  if (cached) return cached;
 
   const [items, count] = await Promise.all([
     prisma.order.findMany({
@@ -147,18 +176,25 @@ export async function listOrders(args: {
     prisma.order.count({ where }),
   ]);
 
-  return { items, count };
+  const result = { items, count };
+  await queryCache.set(cacheKey, result, { ttlSeconds: ORDER_CACHE_TTL });
+  return result;
 }
 
 export async function updateOrderStatus(
   id: string,
-  newStatus: OrderStatus
+  newStatus: OrderStatus,
+  tenantId: string
 ) {
   return prisma.$transaction(async (tx) => {
-    const order = await tx.order.findUnique({ where: { id } });
+    const order = await tx.order.findUnique({ where: { id, tenantId } });
     if (!order) throw new NotFoundError("Order");
 
-    const currentStatus = order.status as OrderStatus;
+    const currentStatusStr = order.status;
+    if (!isOrderStatus(currentStatusStr)) {
+      throw new ValidationError(`Invalid order status: ${currentStatusStr}`);
+    }
+    const currentStatus = currentStatusStr;
     const allowedTransitions = VALID_TRANSITIONS[currentStatus];
 
     if (!allowedTransitions.includes(newStatus)) {
@@ -174,32 +210,80 @@ export async function updateOrderStatus(
     });
 
     if (newStatus === "cancelled" || newStatus === "refunded") {
-      for (const item of updatedOrder.items) {
-        await tx.stockMovement.create({
-          data: {
-            tenantId: order.tenantId,
-            branchId: order.branchId,
-            productId: item.productId,
-            variantId: item.variantId,
-            type: "INBOUND",
-            quantity: item.quantity,
-            reason: `${newStatus} order ${order.id}`,
-            referenceId: order.id,
-          },
-        });
+      const stockMovementData = updatedOrder.items.map((item) => ({
+        tenantId: order.tenantId,
+        branchId: order.branchId,
+        productId: item.productId,
+        variantId: item.variantId,
+        type: "INBOUND" as const,
+        quantity: item.quantity,
+        reason: `${newStatus} order ${order.id}`,
+        referenceId: order.id,
+      }));
 
-        await invalidateStockCache(item.productId, order.branchId, item.variantId);
-      }
+      await tx.stockMovement.createMany({ data: stockMovementData });
+
+      await Promise.all(
+        updatedOrder.items.map((item) => invalidateStockCache(item.productId, order.branchId, item.variantId, order.tenantId))
+      );
     }
+
+    await queryCache.invalidate(`order:${id}:${order.tenantId}`);
+    await queryCache.invalidatePattern(`orders:list:${order.tenantId}:*`);
 
     return updatedOrder;
   });
 }
 
-export async function getGuestOrders(email: string) {
+export async function getGuestOrders(email: string, tenantId: string, args: { take?: number; skip?: number } = {}) {
   return prisma.order.findMany({
-    where: { guestEmail: email },
+    where: { guestEmail: email, tenantId },
+    take: args.take ?? 20,
+    skip: args.skip ?? 0,
     orderBy: { createdAt: "desc" },
     include: { items: true, branch: true },
+  });
+}
+
+export async function updateOrderPaymentStatus(
+  orderId: string,
+  paymentStatus: "pending" | "approved" | "rejected" | "cancelled" | "refunded"
+) {
+  return prisma.$transaction(async (tx) => {
+    const order = await tx.order.findUnique({
+      where: { id: orderId },
+      include: { items: true },
+    });
+
+    if (!order) {
+      throw new NotFoundError("Order");
+    }
+
+    if (paymentStatus === "rejected" || paymentStatus === "cancelled") {
+      const stockMovementData = order.items.map((item) => ({
+        tenantId: order.tenantId,
+        branchId: order.branchId,
+        productId: item.productId,
+        variantId: item.variantId,
+        type: "INBOUND" as const,
+        quantity: item.quantity,
+        reason: `${paymentStatus} payment for order ${order.id}`,
+        referenceId: order.id,
+      }));
+
+      await tx.stockMovement.createMany({ data: stockMovementData });
+
+      for (const item of order.items) {
+        await invalidateStockCache(item.productId, order.branchId, item.variantId, order.tenantId);
+      }
+
+      await queryCache.invalidate(`order:${orderId}:${order.tenantId}`);
+      await queryCache.invalidatePattern(`orders:list:${order.tenantId}:*`);
+    }
+
+    return tx.order.update({
+      where: { id: orderId },
+      data: { paymentStatus },
+    });
   });
 }

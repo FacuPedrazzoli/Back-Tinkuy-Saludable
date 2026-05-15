@@ -1,6 +1,8 @@
 import Redis from "ioredis";
+import { logger } from "./logger";
+import { config } from "./config";
 
-const redisUrl = process.env.REDIS_URL || "redis://localhost:6379";
+const redisUrl = config.redis.url;
 
 export const redis = new Redis(redisUrl, {
   retryStrategy(times) {
@@ -16,17 +18,16 @@ export const redis = new Redis(redisUrl, {
 });
 
 redis.on("error", (err) => {
-  // Only log once to avoid spam
   if (err.message?.includes("ECONNREFUSED")) return;
-  console.error("Redis connection error:", err.message);
+  logger.error({ err, component: "redis" }, "Redis connection error");
 });
 
 redis.on("connect", () => {
-  console.log("✅ Redis connected");
+  logger.info({ component: "redis" }, "Redis connected");
 });
 
 redis.on("reconnecting", () => {
-  console.log("🔄 Redis reconnecting...");
+  logger.warn({ component: "redis" }, "Redis reconnecting");
 });
 
 export async function pingRedis(): Promise<boolean> {
