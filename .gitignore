@@ -9,3 +9,4 @@ coverage/
 .idea/
 *.tsbuildinfo
 prisma/migrations/
+prisma/dev.db

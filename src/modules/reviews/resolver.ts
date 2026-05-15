@@ -178,7 +178,7 @@ builder.mutationField("createReview", (t) =>
 builder.mutationField("approveReview", (t) =>
   t.field({
     type: Review,
-    authScopes: { authenticated: true },
+    authScopes: { manager: true },
     args: {
       reviewId: t.arg.string({ required: true }),
     },
@@ -202,7 +202,7 @@ builder.mutationField("approveReview", (t) =>
 builder.mutationField("deleteReview", (t) =>
   t.field({
     type: Review,
-    authScopes: { authenticated: true },
+    authScopes: { manager: true },
     args: {
       reviewId: t.arg.string({ required: true }),
     },

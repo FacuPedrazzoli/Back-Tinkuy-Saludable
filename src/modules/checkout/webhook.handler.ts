@@ -5,7 +5,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@lib/prisma";
 import { ValidationError } from "@lib/errors";
 import { clearCart, getValidatedCartSnapshot, clearValidatedCartSnapshot } from "@modules/cart/service";
-import { createOrderFromCheckout } from "@modules/orders/service";
+import { createOrderFromCheckout, updateOrderPaymentStatus } from "@modules/orders/service";
 
 const mpConfig = new MercadoPagoConfig({
   accessToken: process.env.MP_ACCESS_TOKEN ?? "",
@@ -127,6 +127,8 @@ async function processWebhookWithTimeout(req: Request, res: Response): Promise<R
 
       if (status === "approved") {
         await processApprovedPayment(payload, mpPayment);
+      } else if (status === "rejected" || status === "cancelled") {
+        await processRejectedOrCancelledPayment(payload, mpPayment);
       }
     }
   } catch (err) {
@@ -224,6 +226,42 @@ async function processApprovedPayment(payload: any, mpPayment: any) {
     } else {
       throw error;
     }
+  }
+
+  await clearCart(cartId, tenantId, isUserCart);
+  await clearValidatedCartSnapshot(preferenceId, tenantId);
+}
+
+async function processRejectedOrCancelledPayment(payload: any, mpPayment: any) {
+  const paymentId = String(payload.data?.id);
+  const preferenceId = payload.data?.preference_id;
+
+  if (!preferenceId) {
+    console.warn("Missing preference ID in rejected/cancelled payment");
+    return;
+  }
+
+  const tenantIdFromExtRef = mpPayment.external_reference?.split(":")[0] ?? "";
+  const snapshot = await getValidatedCartSnapshot(preferenceId, tenantIdFromExtRef);
+
+  if (!snapshot) {
+    console.warn("Cart snapshot not found for rejected/cancelled webhook", preferenceId);
+    return;
+  }
+
+  const { tenantId } = snapshot;
+  const cartId = payload.data?.external_reference?.split(":")[2] ?? "";
+  const isUserCart = payload.data?.external_reference?.endsWith(":user") ?? false;
+
+  const existingOrder = await prisma.order.findFirst({
+    where: {
+      paymentId,
+      tenantId,
+    },
+  });
+
+  if (existingOrder) {
+    await updateOrderPaymentStatus(existingOrder.id, "rejected");
   }
 
   await clearCart(cartId, tenantId, isUserCart);

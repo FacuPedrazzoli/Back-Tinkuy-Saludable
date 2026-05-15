@@ -25,6 +25,7 @@ import { queryComplexityPlugin } from "@graphql/plugins/query-complexity";
 import { logger } from "@lib/logger";
 import { requestLoggingMiddleware } from "@lib/request-logger";
 import { getMetricsSummary, getMetrics } from "@lib/metrics";
+import { initSentry, sentryHandlers } from "@lib/sentry";
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 4000;
@@ -80,6 +81,7 @@ if (process.env.FRONTEND_URL) {
 app.use(cors(corsOptions));
 app.use(compression());
 app.use(timeout('30s'));
+app.use(sentryHandlers.requestHandler());
 app.use(requestLoggingMiddleware);
 
 app.use((req, res) => {
@@ -87,6 +89,8 @@ app.use((req, res) => {
     res.status(408).json({ error: "Request timeout" });
   }
 });
+
+app.use(sentryHandlers.errorHandler());
 
 app.use((req, _res, next) => {
   let tenantId: string | null = null;
@@ -265,6 +269,7 @@ app.post(
 );
 
 async function bootstrap() {
+  initSentry();
   validateConfig();
   logger.info({ component: "bootstrap" }, "Configuration validated");
 

@@ -30,10 +30,20 @@ interface WebhookConfig {
   timeoutMs: number;
 }
 
+interface SentryConfig {
+  dsn: string;
+}
+
+interface AppConfig {
+  env: string;
+  version: string;
+}
+
 interface Config {
   rateLimit: {
     general: RateLimitConfig;
     auth: RateLimitConfig;
+    register: RateLimitConfig;
     checkout: RateLimitConfig;
     fallbackMemoryLimit: number;
   };
@@ -42,6 +52,8 @@ interface Config {
   redis: RedisConfig;
   cache: CacheConfig;
   webhook: WebhookConfig;
+  sentry: SentryConfig;
+  app: AppConfig;
 }
 
 function parseIntOrDefault(value: string | undefined, defaultValue: number, required = false): number {
@@ -85,7 +97,11 @@ export const config: Config = {
     },
     auth: {
       windowMs: parseIntOrDefault(process.env.RATE_LIMIT_AUTH_WINDOW_MS, 15 * 60 * 1000),
-      maxRequests: parseIntOrDefault(process.env.RATE_LIMIT_AUTH_MAX_REQUESTS, 10),
+      maxRequests: parseIntOrDefault(process.env.RATE_LIMIT_AUTH_MAX_REQUESTS, 5),
+    },
+    register: {
+      windowMs: parseIntOrDefault(process.env.RATE_LIMIT_REGISTER_WINDOW_MS, 60 * 60 * 1000),
+      maxRequests: parseIntOrDefault(process.env.RATE_LIMIT_REGISTER_MAX_REQUESTS, 3),
     },
     checkout: {
       windowMs: parseIntOrDefault(process.env.RATE_LIMIT_CHECKOUT_WINDOW_MS, 60 * 1000),
@@ -112,6 +128,13 @@ export const config: Config = {
   },
   webhook: {
     timeoutMs: parseIntOrDefault(process.env.WEBHOOK_TIMEOUT_MS, 30000),
+  },
+  sentry: {
+    dsn: getEnv("SENTRY_DSN", ""),
+  },
+  app: {
+    env: process.env.NODE_ENV ?? "development",
+    version: process.env.APP_VERSION ?? "1.0.0",
   },
 };
 
@@ -140,4 +163,4 @@ export function validateConfig(): void {
   }
 }
 
-export type { Config, RateLimitConfig, CartConfig, MercadoPagoConfig, RedisConfig, CacheConfig, WebhookConfig };
+export type { Config, RateLimitConfig, CartConfig, MercadoPagoConfig, RedisConfig, CacheConfig, WebhookConfig, SentryConfig, AppConfig };

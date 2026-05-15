@@ -11,6 +11,8 @@ const DEFAULT_GENERAL: RateLimitConfig = config.rateLimit.general;
 
 const DEFAULT_AUTH: RateLimitConfig = config.rateLimit.auth;
 
+const DEFAULT_REGISTER: RateLimitConfig = config.rateLimit.register;
+
 const DEFAULT_CHECKOUT: RateLimitConfig = config.rateLimit.checkout;
 
 const FALLBACK_MEMORY_LIMIT = config.rateLimit.fallbackMemoryLimit;
@@ -92,6 +94,10 @@ function memoryFallbackCleanup(): void {
 
 export async function rateLimitAuth(identifier: string): Promise<void> {
   return rateLimit(`auth:${identifier}`, DEFAULT_AUTH);
+}
+
+export async function rateLimitRegister(identifier: string): Promise<void> {
+  return rateLimit(`register:${identifier}`, DEFAULT_REGISTER);
 }
 
 export async function rateLimitCheckout(identifier: string): Promise<void> {

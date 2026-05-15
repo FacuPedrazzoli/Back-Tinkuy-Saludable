@@ -24,6 +24,7 @@
     "@pothos/plugin-scope-auth": "^3.20.0",
     "@pothos/plugin-validation": "^3.10.0",
     "@prisma/client": "^5.10.0",
+    "@sentry/node": "^7.120.4",
     "bcryptjs": "^2.4.3",
     "compression": "^1.7.4",
     "connect-timeout": "^1.9.1",

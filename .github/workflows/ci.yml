@@ -61,9 +61,9 @@ jobs:
             LINES_PCT=$(cat $COVERAGE_FILE | grep -o '"lines":"[0-9.]*' | cut -d'"' -f4)
             FUNCTIONS_PCT=$(cat $COVERAGE_FILE | grep -o '"functions":"[0-9.]*' | cut -d'"' -f4)
             BRANCHES_PCT=$(cat $COVERAGE_FILE | grep -o '"branches":"[0-9.]*' | cut -d'"' -f4)
-            
+
             echo "Coverage: lines=$LINES_PCT%, functions=$FUNCTIONS_PCT%, branches=$BRANCHES_PCT%"
-            
+
             PASS=true
             if (( $(echo "$LINES_PCT < 80" | bc -l) )); then
               echo "Lines coverage ($LINES_PCT%) is below threshold (80%)"
@@ -77,7 +77,7 @@ jobs:
               echo "Branches coverage ($BRANCHES_PCT%) is below threshold (70%)"
               PASS=false
             fi
-            
+
             if [ "$PASS" = false ]; then
               exit 1
             fi
@@ -85,3 +85,18 @@ jobs:
             echo "Coverage file not found at $COVERAGE_FILE"
             exit 1
           fi
+
+  build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build backend
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: facusito-app:test
+

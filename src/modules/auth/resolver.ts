@@ -1,6 +1,6 @@
 import { builder } from "@graphql/builder";
 import * as authService from "./service";
-import { rateLimitAuth } from "@lib/rate-limit";
+import { rateLimitAuth, rateLimitRegister } from "@lib/rate-limit";
 import { AuthenticationError } from "@lib/errors";
 
 // ─── Types ───
@@ -173,7 +173,7 @@ builder.mutationField("customerRegister", (t) =>
     type: CustomerAuthResult,
     args: { input: t.arg({ type: CustomerRegisterInput, required: true }) },
     resolve: async (_parent, { input }) => {
-      await rateLimitAuth(`register:${input.email.toLowerCase().trim()}`);
+      await rateLimitRegister(`register:${input.email.toLowerCase().trim()}`);
       return authService.customerRegister(input);
     },
   })
