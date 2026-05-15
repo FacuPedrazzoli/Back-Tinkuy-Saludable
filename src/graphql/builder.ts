@@ -33,7 +33,11 @@ export const builder = new SchemaBuilder<{
     authenticated: boolean;
   };
 }>({
-  plugins: [PrismaPlugin, ScopeAuthPlugin, ValidationPlugin],
+  plugins: [
+    PrismaPlugin,
+    ScopeAuthPlugin,
+    ValidationPlugin,
+  ],
   prisma: {
     client: prisma,
     filterConnectionTotalCount: true,

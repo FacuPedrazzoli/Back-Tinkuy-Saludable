@@ -30,7 +30,7 @@ export async function createImage(input: {
   variantId?: string;
   url: string;
   altText?: string | null;
-  sortOrder?: number;
+  position?: number;
 }) {
   if (!input.productId && !input.variantId) {
     throw new ValidationError("Either productId or variantId is required");
@@ -63,14 +63,14 @@ export async function createImage(input: {
       variantId: input.variantId,
       url: input.url,
       altText: input.altText,
-      sortOrder: input.sortOrder ?? 0,
+      position: input.position ?? 0,
     },
   });
 }
 
 export async function updateImage(
   id: string,
-  input: { url?: string; altText?: string | null; sortOrder?: number },
+  input: { url?: string; altText?: string | null; position?: number },
   tenantId: string
 ) {
   if (input.url !== undefined && !isValidImageUrl(input.url)) {
@@ -91,13 +91,13 @@ export async function deleteImage(id: string, tenantId: string) {
 export async function listProductImages(productId: string) {
   return prisma.productImage.findMany({
     where: { productId },
-    orderBy: { sortOrder: "asc" },
+    orderBy: { position: "asc" },
   });
 }
 
 export async function listVariantImages(variantId: string) {
   return prisma.productImage.findMany({
     where: { variantId },
-    orderBy: { sortOrder: "asc" },
+    orderBy: { position: "asc" },
   });
 }

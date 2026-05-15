@@ -1,0 +1,104 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: tinkuy-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-tinkuy}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-tinkuy}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - internal
+
+  redis:
+    image: redis:7-alpine
+    container_name: tinkuy-redis
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - internal
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tinkuy-app
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      NODE_ENV: production
+      PORT: 4000
+      FRONTEND_URL: ${FRONTEND_URL}
+      JWT_ADMIN_SECRET: ${JWT_ADMIN_SECRET}
+      JWT_CUSTOMER_SECRET: ${JWT_CUSTOMER_SECRET}
+      MP_ACCESS_TOKEN: ${MP_ACCESS_TOKEN}
+      MP_WEBHOOK_SECRET: ${MP_WEBHOOK_SECRET}
+      MP_MODE: ${MP_MODE:-production}
+      RATE_LIMIT_GENERAL_WINDOW_MS: ${RATE_LIMIT_GENERAL_WINDOW_MS:-60000}
+      RATE_LIMIT_GENERAL_MAX_REQUESTS: ${RATE_LIMIT_GENERAL_MAX_REQUESTS:-100}
+      RATE_LIMIT_AUTH_WINDOW_MS: ${RATE_LIMIT_AUTH_WINDOW_MS:-900000}
+      RATE_LIMIT_AUTH_MAX_REQUESTS: ${RATE_LIMIT_AUTH_MAX_REQUESTS:-10}
+      RATE_LIMIT_CHECKOUT_WINDOW_MS: ${RATE_LIMIT_CHECKOUT_WINDOW_MS:-60000}
+      RATE_LIMIT_CHECKOUT_MAX_REQUESTS: ${RATE_LIMIT_CHECKOUT_MAX_REQUESTS:-10}
+      CART_TTL_SECONDS: ${CART_TTL_SECONDS:-86400}
+      CART_LOCK_TTL_SECONDS: ${CART_LOCK_TTL_SECONDS:-5}
+      CART_LOCK_RETRY_COUNT: ${CART_LOCK_RETRY_COUNT:-3}
+      CART_LOCK_RETRY_DELAY_MS: ${CART_LOCK_RETRY_DELAY_MS:-100}
+      STOCK_TTL_SECONDS: ${STOCK_TTL_SECONDS:-300}
+      WEBHOOK_TIMEOUT_MS: ${WEBHOOK_TIMEOUT_MS:-30000}
+      UPLOAD_DIR: ${UPLOAD_DIR:-/app/uploads}
+      MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-5}
+      TRUST_PROXY: "1"
+    volumes:
+      - uploads_data:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - internal
+
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: tinkuy-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - uploads_data:/app/uploads:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - app
+    restart: unless-stopped
+    networks:
+      - internal
+
+volumes:
+  postgres_data:
+  redis_data:
+  uploads_data:
+
+networks:
+  internal:
+    driver: bridge

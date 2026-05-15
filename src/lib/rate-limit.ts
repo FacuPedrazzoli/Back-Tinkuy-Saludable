@@ -37,9 +37,6 @@ export async function rateLimit(
   const isRedisAvailableNow = await checkRedis();
 
   if (!isRedisAvailableNow) {
-    if (process.env.NODE_ENV === 'production') {
-      throw new RateLimitError('Service temporarily unavailable');
-    }
     memoryFallbackCleanup();
     const entry = memoryFallback.get(key);
     const now = Date.now();

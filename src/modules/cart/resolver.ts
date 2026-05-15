@@ -60,21 +60,21 @@ const StockValidationResult = builder.objectRef<StockValidationResultShape>("Sto
 
 const AddToCartInput = builder.inputType("AddToCartInput", {
   fields: (t) => ({
-    cartId: t.string({ maxLength: 64 }),
-    productId: t.string({ required: true, maxLength: 64 }),
-    variantId: t.string({ maxLength: 64 }),
-    name: t.string({ required: true, maxLength: 255 }),
+    cartId: t.string({ validate: { maxLength: 64 } }),
+    productId: t.string({ required: true, validate: { maxLength: 64 } }),
+    variantId: t.string({ validate: { maxLength: 64 } }),
+    name: t.string({ required: true, validate: { maxLength: 255 } }),
     price: t.float({ required: true }),
-    quantity: t.int({ required: true, minValue: 1 }),
-    imageUrl: t.string({ maxLength: 2048 }),
+    quantity: t.int({ required: true, validate: { min: 1 } }),
+    imageUrl: t.string({ validate: { maxLength: 2048 } }),
   }),
 });
 
 const UpdateCartItemInput = builder.inputType("UpdateCartItemInput", {
   fields: (t) => ({
-    productId: t.string({ required: true, maxLength: 64 }),
-    variantId: t.string({ maxLength: 64 }),
-    quantity: t.int({ required: true, minValue: 0 }),
+    productId: t.string({ required: true, validate: { maxLength: 64 } }),
+    variantId: t.string({ validate: { maxLength: 64 } }),
+    quantity: t.int({ required: true, validate: { min: 0 } }),
   }),
 });
 

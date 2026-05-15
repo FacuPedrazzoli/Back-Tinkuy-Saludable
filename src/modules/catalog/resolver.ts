@@ -127,10 +127,10 @@ export const ProductSupplier = builder.prismaObject("ProductSupplier", {
 
 const CreateProductInput = builder.inputType("CreateProductInput", {
   fields: (t) => ({
-    name: t.string({ required: true, maxLength: 255 }),
-    slug: t.string({ maxLength: 120 }),
-    description: t.string({ maxLength: 5000 }),
-    sku: t.string({ maxLength: 100 }),
+    name: t.string({ required: true, validate: { maxLength: 255 } }),
+    slug: t.string({ validate: { maxLength: 120 } }),
+    description: t.string({ validate: { maxLength: 5000 } }),
+    sku: t.string({ validate: { maxLength: 100 } }),
     basePrice: t.float({ required: true }),
     tagIds: t.stringList(),
     supplierIds: t.stringList(),
@@ -139,10 +139,10 @@ const CreateProductInput = builder.inputType("CreateProductInput", {
 
 const UpdateProductInput = builder.inputType("UpdateProductInput", {
   fields: (t) => ({
-    name: t.string({ maxLength: 255 }),
-    slug: t.string({ maxLength: 120 }),
-    description: t.string({ maxLength: 5000 }),
-    sku: t.string({ maxLength: 100 }),
+    name: t.string({ validate: { maxLength: 255 } }),
+    slug: t.string({ validate: { maxLength: 120 } }),
+    description: t.string({ validate: { maxLength: 5000 } }),
+    sku: t.string({ validate: { maxLength: 100 } }),
     basePrice: t.float(),
     isActive: t.boolean(),
     isVisible: t.boolean(),
@@ -152,17 +152,17 @@ const UpdateProductInput = builder.inputType("UpdateProductInput", {
 
 const CreateVariantInput = builder.inputType("CreateVariantInput", {
   fields: (t) => ({
-    productId: t.string({ required: true, maxLength: 64 }),
-    sku: t.string({ required: true, maxLength: 100 }),
-    name: t.string({ required: true, maxLength: 255 }),
+    productId: t.string({ required: true, validate: { maxLength: 64 } }),
+    sku: t.string({ required: true, validate: { maxLength: 100 } }),
+    name: t.string({ required: true, validate: { maxLength: 255 } }),
     price: t.float({ required: true }),
   }),
 });
 
 const UpdateVariantInput = builder.inputType("UpdateVariantInput", {
   fields: (t) => ({
-    sku: t.string({ maxLength: 100 }),
-    name: t.string({ maxLength: 255 }),
+    sku: t.string({ validate: { maxLength: 100 } }),
+    name: t.string({ validate: { maxLength: 255 } }),
     price: t.float(),
     isActive: t.boolean(),
   }),
@@ -170,26 +170,26 @@ const UpdateVariantInput = builder.inputType("UpdateVariantInput", {
 
 const CreateTagInput = builder.inputType("CreateTagInput", {
   fields: (t) => ({
-    name: t.string({ required: true, maxLength: 100 }),
-    slug: t.string({ maxLength: 120 }),
+    name: t.string({ required: true, validate: { maxLength: 100 } }),
+    slug: t.string({ validate: { maxLength: 120 } }),
   }),
 });
 
 const CreateSupplierInput = builder.inputType("CreateSupplierInput", {
   fields: (t) => ({
-    name: t.string({ required: true, maxLength: 255 }),
-    email: t.string({ maxLength: 255 }),
-    phone: t.string({ maxLength: 20 }),
-    address: t.string({ maxLength: 500 }),
+    name: t.string({ required: true, validate: { maxLength: 255 } }),
+    email: t.string({ validate: { maxLength: 255 } }),
+    phone: t.string({ validate: { maxLength: 20 } }),
+    address: t.string({ validate: { maxLength: 500 } }),
   }),
 });
 
 const CreateAttributeInput = builder.inputType("CreateAttributeInput", {
   fields: (t) => ({
-    productId: t.string({ maxLength: 64 }),
-    variantId: t.string({ maxLength: 64 }),
-    key: t.string({ required: true, maxLength: 100 }),
-    value: t.string({ required: true, maxLength: 500 }),
+    productId: t.string({ validate: { maxLength: 64 } }),
+    variantId: t.string({ validate: { maxLength: 64 } }),
+    key: t.string({ required: true, validate: { maxLength: 100 } }),
+    value: t.string({ required: true, validate: { maxLength: 500 } }),
   }),
 });
 

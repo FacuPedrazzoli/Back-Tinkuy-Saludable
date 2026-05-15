@@ -24,19 +24,18 @@ function isTenantModel(model: string): boolean {
   return TENANT_MODELS.includes(model);
 }
 
-type PrismaArgs = Record<string, unknown>;
-
-function injectTenantFilter(args: PrismaArgs | null, tenantId: string): PrismaArgs | null {
+function injectTenantFilter(args: unknown, tenantId: string): unknown {
   if (!args || typeof args !== "object") return args;
 
   if (Array.isArray(args)) {
-    return args.map((item) => injectTenantFilter(item as PrismaArgs, tenantId)) as PrismaArgs;
+    return args.map((item) => injectTenantFilter(item, tenantId));
   }
 
   const result: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(args)) {
+  for (const [key, value] of Object.entries(args as Record<string, unknown>)) {
     if (key === "where" && value && typeof value === "object") {
-      result[key] = { ...injectTenantFilter(value, tenantId), tenantId };
+      const filtered = injectTenantFilter(value, tenantId) as Record<string, unknown>;
+      result[key] = { ...filtered, tenantId };
     } else if (typeof value === "object" && value !== null) {
       result[key] = injectTenantFilter(value, tenantId);
     } else {
@@ -54,7 +53,7 @@ const prismaOptions: ConstructorParameters<typeof PrismaClient>[0] = {
       : ["error"],
 };
 
-const DB_CONNECTION_LIMIT = parseInt(process.env.DB_CONNECTION_LIMIT ?? "10", 10);
+const DB_CONNECTION_LIMIT = parseInt(process.env.DB_CONNECTION_LIMIT ?? "50", 10);
 const DB_POOL_TIMEOUT = parseInt(process.env.DB_POOL_TIMEOUT ?? "20", 10);
 
 if (databaseUrl && !databaseUrl.includes("connection_limit")) {

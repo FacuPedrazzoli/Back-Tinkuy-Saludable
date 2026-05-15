@@ -7,7 +7,7 @@ export const ProductImage = builder.prismaObject("ProductImage", {
     id: t.exposeID("id"),
     url: t.exposeString("url"),
     altText: t.exposeString("altText", { nullable: true }),
-    sortOrder: t.exposeInt("sortOrder"),
+    position: t.exposeInt("position"),
     createdAt: t.expose("createdAt", { type: "DateTime" }),
     product: t.relation("product", { nullable: true }),
     variant: t.relation("variant", { nullable: true }),
@@ -16,19 +16,19 @@ export const ProductImage = builder.prismaObject("ProductImage", {
 
 const CreateImageInput = builder.inputType("CreateImageInput", {
   fields: (t) => ({
-    productId: t.string({ maxLength: 64 }),
-    variantId: t.string({ maxLength: 64 }),
-    url: t.string({ required: true, maxLength: 2048 }),
-    altText: t.string({ maxLength: 500 }),
-    sortOrder: t.int(),
+    productId: t.string(),
+    variantId: t.string(),
+    url: t.string({ required: true }),
+    altText: t.string(),
+    position: t.int(),
   }),
 });
 
 const UpdateImageInput = builder.inputType("UpdateImageInput", {
   fields: (t) => ({
-    url: t.string({ maxLength: 2048 }),
-    altText: t.string({ maxLength: 500 }),
-    sortOrder: t.int(),
+    url: t.string(),
+    altText: t.string(),
+    position: t.int(),
   }),
 });
 
@@ -48,7 +48,7 @@ builder.mutationField("createImage", (t) =>
         productId: input.productId ?? undefined,
         variantId: input.variantId ?? undefined,
         altText: input.altText ?? undefined,
-        sortOrder: input.sortOrder ?? undefined,
+        position: input.position ?? undefined,
       });
     },
   })
@@ -67,7 +67,7 @@ builder.mutationField("updateImage", (t) =>
       return mediaService.updateImage(id, {
         url: input.url ?? undefined,
         altText: input.altText ?? undefined,
-        sortOrder: input.sortOrder ?? undefined,
+        position: input.position ?? undefined,
       }, ctx.tenantId);
     },
   })

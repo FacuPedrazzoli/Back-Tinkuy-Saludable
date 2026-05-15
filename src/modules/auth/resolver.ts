@@ -75,35 +75,35 @@ const AdminAuthResult = builder.objectRef<AdminAuthResultShape>("AdminAuthResult
 
 const AdminLoginInput = builder.inputType("AdminLoginInput", {
   fields: (t) => ({
-    email: t.string({ required: true, minLength: 1, maxLength: 255 }),
-    password: t.string({ required: true, minLength: 1 }),
-    tenantId: t.string({ required: true, minLength: 1, maxLength: 64 }),
+    email: t.string({ required: true, validate: { minLength: 1, maxLength: 255 } }),
+    password: t.string({ required: true, validate: { minLength: 1 } }),
+    tenantId: t.string({ required: true, validate: { minLength: 1, maxLength: 64 } }),
   }),
 });
 
 const CustomerLoginInput = builder.inputType("CustomerLoginInput", {
   fields: (t) => ({
-    email: t.string({ required: true, minLength: 1, maxLength: 255 }),
-    password: t.string({ required: true, minLength: 1 }),
-    tenantId: t.string({ required: true, minLength: 1, maxLength: 64 }),
+    email: t.string({ required: true, validate: { minLength: 1, maxLength: 255 } }),
+    password: t.string({ required: true, validate: { minLength: 1 } }),
+    tenantId: t.string({ required: true, validate: { minLength: 1, maxLength: 64 } }),
   }),
 });
 
 const CustomerRegisterInput = builder.inputType("CustomerRegisterInput", {
   fields: (t) => ({
-    email: t.string({ required: true, minLength: 1, maxLength: 255 }),
-    password: t.string({ required: true, minLength: 8, maxLength: 128 }),
-    firstName: t.string({ required: true, minLength: 1, maxLength: 100 }),
-    lastName: t.string({ required: true, minLength: 1, maxLength: 100 }),
-    phone: t.string({ maxLength: 20 }),
-    tenantId: t.string({ required: true, minLength: 1, maxLength: 64 }),
+    email: t.string({ required: true, validate: { minLength: 1, maxLength: 255 } }),
+    password: t.string({ required: true, validate: { minLength: 8, maxLength: 128 } }),
+    firstName: t.string({ required: true, validate: { minLength: 1, maxLength: 100 } }),
+    lastName: t.string({ required: true, validate: { minLength: 1, maxLength: 100 } }),
+    phone: t.string({ validate: { maxLength: 20 } }),
+    tenantId: t.string({ required: true, validate: { minLength: 1, maxLength: 64 } }),
   }),
 });
 
 const ChangePasswordInput = builder.inputType("ChangePasswordInput", {
   fields: (t) => ({
-    oldPassword: t.string({ required: true, minLength: 1 }),
-    newPassword: t.string({ required: true, minLength: 8, maxLength: 128 }),
+    oldPassword: t.string({ required: true, validate: { minLength: 1 } }),
+    newPassword: t.string({ required: true, validate: { minLength: 8, maxLength: 128 } }),
   }),
 });
 
@@ -193,6 +193,64 @@ builder.mutationField("changePassword", (t) =>
         input.oldPassword,
         input.newPassword
       );
+    },
+  })
+);
+
+interface RefreshTokenResultShape {
+  accessToken: string;
+  refreshToken: string;
+}
+
+const RefreshTokenResult = builder.objectRef<RefreshTokenResultShape>("RefreshTokenResult").implement({
+  fields: (t) => ({
+    accessToken: t.exposeString("accessToken"),
+    refreshToken: t.exposeString("refreshToken"),
+  }),
+});
+
+const RefreshAccessTokenInput = builder.inputType("RefreshAccessTokenInput", {
+  fields: (t) => ({
+    refreshToken: t.string({ required: true }),
+  }),
+});
+
+builder.mutationField("refreshAccessToken", (t) =>
+  t.field({
+    type: RefreshTokenResult,
+    args: { input: t.arg({ type: RefreshAccessTokenInput, required: true }) },
+    resolve: async (_parent, { input }, ctx) => {
+      const ipAddress = ctx.req.ip ?? ctx.req.socket.remoteAddress ?? undefined;
+      const userAgent = ctx.req.headers["user-agent"];
+      const result = await authService.refreshAccessToken(input.refreshToken, ipAddress, userAgent);
+      return {
+        accessToken: result.accessToken,
+        refreshToken: result.newRefreshToken,
+      };
+    },
+  })
+);
+
+builder.mutationField("revokeAllSessions", (t) =>
+  t.field({
+    type: "Boolean",
+    authScopes: { authenticated: true },
+    resolve: async (_parent, _args, ctx) => {
+      if (!ctx.user) throw new AuthenticationError("Unauthorized");
+      const userType = ctx.user.role === "customer" ? "customer" : "admin";
+      await authService.revokeAllUserRefreshTokens(ctx.user.id, userType);
+      return true;
+    },
+  })
+);
+
+builder.mutationField("revokeRefreshToken", (t) =>
+  t.field({
+    type: "Boolean",
+    args: { refreshToken: t.arg({ type: "String", required: true }) },
+    resolve: async (_parent, { refreshToken }) => {
+      await authService.revokeRefreshToken(refreshToken);
+      return true;
     },
   })
 );

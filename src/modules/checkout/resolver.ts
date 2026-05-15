@@ -22,9 +22,9 @@ const CheckoutResult = builder.objectRef<CheckoutResultShape>("CheckoutResult").
 
 const CheckoutInput = builder.inputType("CheckoutInput", {
   fields: (t) => ({
-    cartId: t.string({ required: true, maxLength: 64 }),
-    branchId: t.string({ required: true, maxLength: 64 }),
-    guestEmail: t.string({ maxLength: 255 }),
+    cartId: t.string({ required: true }),
+    branchId: t.string({ required: true }),
+    guestEmail: t.string({}),
   }),
 });
 

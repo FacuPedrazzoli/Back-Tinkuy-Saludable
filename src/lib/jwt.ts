@@ -9,8 +9,8 @@ const TOKEN_BLACKLIST_TTL = 86400;
 
 export function validateSecrets(): void {
   const errors: string[] = [];
-  if (!ADMIN_SECRET) errors.push("JWT_ADMIN_SECRET is required");
-  if (!CUSTOMER_SECRET) errors.push("JWT_CUSTOMER_SECRET is required");
+  if (!process.env.JWT_ADMIN_SECRET) errors.push("JWT_ADMIN_SECRET is required");
+  if (!process.env.JWT_CUSTOMER_SECRET) errors.push("JWT_CUSTOMER_SECRET is required");
   if (errors.length > 0) {
     throw new AppError("BOOTSTRAP_ERROR", errors.join("; "), 500);
   }
@@ -23,8 +23,8 @@ function getJwtSecret(name: string, value: string | undefined): string {
   return value;
 }
 
-export const validatedAdminSecret = getJwtSecret("JWT_ADMIN_SECRET", ADMIN_SECRET);
-export const validatedCustomerSecret = getJwtSecret("JWT_CUSTOMER_SECRET", CUSTOMER_SECRET);
+export const validatedAdminSecret = getJwtSecret("JWT_ADMIN_SECRET", process.env.JWT_ADMIN_SECRET);
+export const validatedCustomerSecret = getJwtSecret("JWT_CUSTOMER_SECRET", process.env.JWT_CUSTOMER_SECRET);
 
 export interface AdminTokenPayload {
   sub: string; // adminUserId

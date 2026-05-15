@@ -4,6 +4,9 @@ import cors from "cors";
 import helmet from "helmet";
 import compression from "compression";
 import timeout from "connect-timeout";
+import multer from "multer";
+import path from "path";
+import crypto from "crypto";
 import { ApolloServer } from "@apollo/server";
 import { expressMiddleware } from "@apollo/server/express4";
 import { schema } from "@graphql/schema";
@@ -18,12 +21,14 @@ import { validateSecrets, validatedAdminSecret, validatedCustomerSecret } from "
 import { validateConfig } from "@lib/config";
 import jwt from "jsonwebtoken";
 import { depthLimitPlugin } from "@graphql/plugins/depth-limit";
+import { queryComplexityPlugin } from "@graphql/plugins/query-complexity";
 import { logger } from "@lib/logger";
 import { requestLoggingMiddleware } from "@lib/request-logger";
 import { getMetricsSummary, getMetrics } from "@lib/metrics";
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 4000;
+let server: any;
 
 const trustProxy = process.env.TRUST_PROXY;
 if (trustProxy !== undefined) {
@@ -51,7 +56,7 @@ app.use(helmet({
     },
   },
   xContentTypeOptions: true,
-  xFrameOptions: "DENY",
+  xFrameOptions: { action: "deny" },
   strictTransportSecurity: {
     maxAge: 31536000,
     includeSubDomains: true,
@@ -129,6 +134,65 @@ app.use((req, _res, next) => {
 
 app.use(express.json());
 
+const uploadDir = process.env.UPLOAD_DIR || "/app/uploads";
+const maxFileSize = (parseInt(process.env.MAX_FILE_SIZE_MB || "5", 10)) * 1024 * 1024;
+
+const storage = multer.diskStorage({
+  destination: (_req, _file, cb) => {
+    cb(null, uploadDir);
+  },
+  filename: (_req, file, cb) => {
+    const uniqueSuffix = `${Date.now()}-${crypto.randomBytes(8).toString("hex")}`;
+    cb(null, `${uniqueSuffix}${path.extname(file.originalname)}`);
+  },
+});
+
+const fileFilter = (
+  _req: express.Request,
+  file: Express.Multer.File,
+  cb: multer.FileFilterCallback
+) => {
+  const allowed = [".jpeg", ".jpg", ".png", ".gif", ".webp"];
+  const ext = path.extname(file.originalname).toLowerCase();
+  if (allowed.includes(ext)) {
+    cb(null, true);
+  } else {
+    cb(new Error("Invalid file type. Only jpeg, png, gif, and webp are allowed."));
+  }
+};
+
+const upload = multer({
+  storage,
+  fileFilter,
+  limits: { fileSize: maxFileSize },
+});
+
+app.post(
+  "/upload",
+  async (req: express.Request, _res: express.Response, next: express.NextFunction) => {
+    try {
+      const identifier = req.ip ?? req.socket.remoteAddress ?? "anonymous";
+      await rateLimitGeneral(`upload:${identifier}`);
+      next();
+    } catch (err) {
+      next(err);
+    }
+  },
+  upload.single("file"),
+  (req: express.Request, res: express.Response) => {
+    if (!req.file) {
+      res.status(400).json({ error: "No file uploaded" });
+      return;
+    }
+    res.json({
+      url: `/uploads/${req.file.filename}`,
+      filename: req.file.filename,
+      originalName: req.file.originalname,
+      size: req.file.size,
+    });
+  }
+);
+
 // Health check
 app.get("/health", async (_req, res) => {
   try {
@@ -157,6 +221,33 @@ app.get("/metrics", (_req, res) => {
   res.json(metrics);
 });
 
+// Contact form
+app.post(
+  "/contact",
+  async (req: express.Request, _res: express.Response, next: express.NextFunction) => {
+    try {
+      const identifier = req.ip ?? req.socket.remoteAddress ?? "anonymous";
+      await rateLimitGeneral(`contact:${identifier}`);
+      next();
+    } catch (err) {
+      next(err);
+    }
+  },
+  express.json(),
+  async (req: express.Request, res: express.Response) => {
+    const { name, email, message } = req.body;
+
+    if (!name || !email || !message) {
+      res.status(400).json({ error: "Name, email, and message are required" });
+      return;
+    }
+
+    logger.info({ component: "contact", name, email }, "Contact form submission");
+
+    res.json({ success: true, message: "Message received" });
+  }
+);
+
 // MercadoPago webhook
 app.post(
   "/webhooks/mercadopago",
@@ -183,11 +274,17 @@ async function bootstrap() {
   await prisma.$connect();
   logger.info({ component: "bootstrap" }, "Database connected");
 
+  const IS_PRODUCTION = process.env.NODE_ENV === "production";
+  const introspection = !IS_PRODUCTION && process.env.GRAPHQL_INTROSPECTION === "true";
+
   server = new ApolloServer({
     schema,
     formatError,
-    introspection: process.env.NODE_ENV === "production",
-    plugins: [depthLimitPlugin],
+    introspection,
+    plugins: [
+      depthLimitPlugin(),
+      queryComplexityPlugin(),
+    ],
   });
 
   await server.start();

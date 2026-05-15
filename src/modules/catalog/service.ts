@@ -1,391 +1,586 @@
-import { prisma } from "@lib/prisma";
-import { NotFoundError, ValidationError, ForbiddenError } from "@lib/errors";
-import { sanitizeSlug, sanitizeString } from "@lib/validation";
-import { getStockCached, getBatchStockCached, type BatchStockKey } from "@lib/cache";
-import { queryCache, PRODUCT_CACHE_TTL } from "@lib/query-cache";
-import { Prisma } from "@prisma/client";
+import { PrismaClient, Prisma } from '@prisma/client';
+import Redis from 'ioredis';
 
-interface ProductCreateInput {
-  tenantId: string;
-  name: string;
-  slug?: string;
-  description?: string | null;
-  sku?: string | null;
-  basePrice: number;
-  tagIds?: string[];
-  supplierIds?: string[];
-}
+const prisma = new PrismaClient();
+const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
 
-// ─── Products ───
+const CACHE_TTL = 300;
 
-export async function createProduct(input: ProductCreateInput) {
-  const slug = sanitizeSlug(input.slug || input.name);
-
-  const existingSlug = await prisma.product.findFirst({
-    where: { tenantId: input.tenantId, slug },
-  });
-  if (existingSlug) {
-    throw new ValidationError(`Product with slug "${slug}" already exists`);
-  }
-
-  if (input.tagIds?.length) {
-    const tags = await prisma.tag.findMany({
-      where: { id: { in: input.tagIds }, tenantId: input.tenantId },
-    });
-    if (tags.length !== input.tagIds.length) {
-      throw new ValidationError("One or more tags do not belong to this tenant");
-    }
-  }
-
-  if (input.supplierIds?.length) {
-    const suppliers = await prisma.supplier.findMany({
-      where: { id: { in: input.supplierIds }, tenantId: input.tenantId },
-    });
-    if (suppliers.length !== input.supplierIds.length) {
-      throw new ValidationError("One or more suppliers do not belong to this tenant");
-    }
-  }
-
-  return prisma.product.create({
-    data: {
-      tenantId: input.tenantId,
-      name: input.name,
-      slug,
-      description: sanitizeString(input.description),
-      sku: input.sku,
-      basePrice: input.basePrice,
-      tags: input.tagIds?.length
-        ? { create: input.tagIds.map((tagId) => ({ tag: { connect: { id: tagId } } })) }
-        : undefined,
-      suppliers: input.supplierIds?.length
-        ? {
-            create: input.supplierIds.map((supplierId) => ({
-              supplier: { connect: { id: supplierId } },
-            })),
-          }
-        : undefined,
-    },
-    include: { variants: true, tags: { include: { tag: true } }, images: true },
-  });
-}
-
-export async function getProduct(id: string, tenantId: string, activeOnly = false) {
-  const cacheKey = `product:${id}:${tenantId}:${activeOnly}`;
-  const cached = await queryCache.get<NonNullable<ReturnType<typeof prisma.product.findUnique>>>(cacheKey);
-  if (cached) return cached;
-
-  const where: Prisma.ProductWhereUniqueInput = { id, tenantId };
-  if (activeOnly) {
-    where.isActive = true;
-    where.isVisible = true;
-  }
-  const product = await prisma.product.findUnique({
-    where,
-    include: {
-      variants: true,
-      attributes: true,
-      images: true,
-      tags: { include: { tag: true } },
-      suppliers: { include: { supplier: true } },
-    },
-  });
-  if (!product) throw new NotFoundError("Product");
-
-  await queryCache.set(cacheKey, product, { ttlSeconds: PRODUCT_CACHE_TTL });
-  return product;
-}
-
-export async function listProducts(args: {
+interface ListProductsArgs {
   tenantId: string;
   search?: string;
   tagSlug?: string;
   isVisible?: boolean;
   take?: number;
   skip?: number;
-}) {
-  const where: Prisma.ProductWhereInput = { tenantId: args.tenantId };
+}
 
-  if (args.isVisible !== undefined) where.isVisible = args.isVisible;
+export async function listProducts(args: ListProductsArgs) {
+  const where: Prisma.ProductWhereInput = {
+    tenantId: args.tenantId,
+  };
+
+  if (args.isVisible !== undefined) {
+    where.isVisible = args.isVisible;
+  }
+
   if (args.search) {
-    where.name = { contains: args.search, mode: "insensitive" };
+    where.OR = [
+      { name: { contains: args.search, mode: 'insensitive' } },
+      { description: { contains: args.search, mode: 'insensitive' } },
+      { sku: { contains: args.search, mode: 'insensitive' } },
+    ];
   }
+
   if (args.tagSlug) {
-    where.tags = { some: { tag: { slug: args.tagSlug } } };
+    where.tags = {
+      some: {
+        tag: { slug: args.tagSlug },
+      },
+    };
   }
-
-  const take = Math.min(args.take ?? 20, 100);
-  const skip = args.skip ?? 0;
-
-  const cacheKey = `products:list:${args.tenantId}:${JSON.stringify(where)}:${take}:${skip}`;
-  const cached = await queryCache.get<{ items: NonNullable<ReturnType<typeof prisma.product.findMany>>; count: number }>(cacheKey);
-  if (cached) return cached;
 
   const [items, count] = await Promise.all([
     prisma.product.findMany({
       where,
-      take,
-      skip,
-      orderBy: { createdAt: "desc" },
       include: {
-        variants: true,
-        images: { orderBy: { sortOrder: "asc" }, take: 1 },
+        images: { where: { productId: { not: null } }, take: 1, orderBy: { position: 'asc' } },
         tags: { include: { tag: true } },
       },
+      take: args.take ?? 20,
+      skip: args.skip ?? 0,
+      orderBy: { createdAt: 'desc' },
     }),
     prisma.product.count({ where }),
   ]);
 
-  const result = { items, count };
-  await queryCache.set(cacheKey, result, { ttlSeconds: PRODUCT_CACHE_TTL });
-  return result;
+  return { items, count };
 }
 
-export async function updateProduct(
-  id: string,
-  input: {
-    tenantId: string;
-    name?: string;
-    slug?: string;
-    description?: string | null;
-    sku?: string | null;
-    basePrice?: number;
-    isActive?: boolean;
-    isVisible?: boolean;
-    tagIds?: string[];
-  }
-) {
-  const product = await prisma.product.findUnique({
-    where: { id },
-    select: { tenantId: true },
+export async function getProduct(id: string, tenantId: string, _includeReviews = false) {
+  const product = await prisma.product.findFirst({
+    where: { id, tenantId },
+    include: {
+      images: { orderBy: { position: 'asc' } },
+      variants: { where: { isActive: true }, include: { images: true, attributes: true } },
+      attributes: true,
+      tags: { include: { tag: true } },
+      suppliers: { include: { supplier: true } },
+    },
   });
-  if (!product) throw new NotFoundError("Product");
-  if (product.tenantId !== input.tenantId) throw new ForbiddenError("Product does not belong to this tenant");
 
-  const data: Prisma.ProductUpdateInput = { ...input };
-  delete (data as Record<string, unknown>).tenantId;
-  if (input.slug) data.slug = sanitizeSlug(input.slug);
-  if (input.description !== undefined) data.description = sanitizeString(input.description);
-
-  if (input.tagIds) {
-    data.tags = {
-      deleteMany: {},
-      create: input.tagIds.map((tagId) => ({ tag: { connect: { id: tagId } } })),
-    };
+  if (!product) {
+    throw new Error(`Product with id ${id} not found`);
   }
 
-  return prisma.product.update({
-    where: { id },
-    data,
-    include: { variants: true, tags: { include: { tag: true } }, images: true },
+  return product;
+}
+
+export async function listTags(tenantId: string) {
+  return prisma.tag.findMany({
+    where: { tenantId },
+    orderBy: { name: 'asc' },
   });
+}
+
+export async function listSuppliers(tenantId: string) {
+  return prisma.supplier.findMany({
+    where: { tenantId },
+    orderBy: { name: 'asc' },
+  });
+}
+
+interface CreateProductArgs {
+  tenantId: string;
+  name: string;
+  slug?: string;
+  description?: string;
+  sku?: string;
+  basePrice: number;
+  tagIds?: string[];
+  supplierIds?: string[];
+}
+
+export async function createProduct(args: CreateProductArgs) {
+  const { tagIds, supplierIds, ...productData } = args;
+
+  return prisma.product.create({
+    data: {
+      tenantId: productData.tenantId,
+      name: productData.name,
+      slug: productData.slug ?? `${productData.name.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`,
+      description: productData.description,
+      sku: productData.sku,
+      basePrice: productData.basePrice,
+      tags: tagIds ? { create: tagIds.map((tagId) => ({ tagId })) } : undefined,
+      suppliers: supplierIds ? { create: supplierIds.map((supplierId) => ({ supplierId })) } : undefined,
+    },
+    include: {
+      images: true,
+      tags: { include: { tag: true } },
+      suppliers: { include: { supplier: true } },
+    },
+  });
+}
+
+interface UpdateProductArgs {
+  tenantId: string;
+  name?: string;
+  slug?: string;
+  description?: string;
+  sku?: string;
+  basePrice?: number;
+  isActive?: boolean;
+  isVisible?: boolean;
+  tagIds?: string[];
+}
+
+export async function updateProduct(id: string, args: UpdateProductArgs) {
+  const { tagIds, ...productData } = args;
+
+  const product = await prisma.product.update({
+    where: { id },
+    data: {
+      ...productData,
+      tags: tagIds
+        ? {
+            deleteMany: {},
+            create: tagIds.map((tagId) => ({ tagId })),
+          }
+        : undefined,
+    },
+    include: {
+      images: true,
+      tags: { include: { tag: true } },
+      suppliers: { include: { supplier: true } },
+    },
+  });
+
+  return product;
 }
 
 export async function deleteProduct(id: string, tenantId: string) {
-  const product = await prisma.product.findUnique({
-    where: { id },
-    select: { tenantId: true },
-  });
-  if (!product) throw new NotFoundError("Product");
-  if (product.tenantId !== tenantId) throw new ForbiddenError("Product does not belong to this tenant");
-  return prisma.product.update({
-    where: { id },
-    data: { isActive: false, isVisible: false },
-  });
+  return prisma.product.delete({ where: { id, tenantId } });
 }
 
-// ─── Variants ───
-
-export async function createVariant(input: {
+interface CreateVariantArgs {
   productId: string;
   sku: string;
   name: string;
   price: number;
-}, tenantId: string) {
-  const product = await prisma.product.findUnique({
-    where: { id: input.productId },
-    select: { tenantId: true },
-  });
-  if (!product) throw new NotFoundError("Product");
-  if (product.tenantId !== tenantId) throw new ForbiddenError("Product does not belong to this tenant");
+}
 
+export async function createVariant(args: CreateVariantArgs, _tenantId: string) {
   return prisma.productVariant.create({
     data: {
-      productId: input.productId,
-      sku: input.sku,
-      name: input.name,
-      price: input.price,
+      productId: args.productId,
+      sku: args.sku,
+      name: args.name,
+      price: args.price,
     },
-    include: { product: true, attributes: true, images: true },
+    include: { images: true, attributes: true },
   });
 }
 
-export async function updateVariant(
-  id: string,
-  input: { sku?: string; name?: string; price?: number; isActive?: boolean },
-  tenantId: string
-) {
-  const variant = await prisma.productVariant.findUnique({
-    where: { id },
-    include: { product: true },
-  });
-  if (!variant) throw new NotFoundError("Variant");
-  if (variant.product.tenantId !== tenantId) throw new ForbiddenError("Variant does not belong to this tenant");
+interface UpdateVariantArgs {
+  sku?: string;
+  name?: string;
+  price?: number;
+  isActive?: boolean;
+}
 
+export async function updateVariant(id: string, args: UpdateVariantArgs, _tenantId: string) {
   return prisma.productVariant.update({
     where: { id },
-    data: input,
-    include: { product: true },
+    data: args,
+    include: { images: true, attributes: true },
   });
 }
 
-export async function deleteVariant(id: string, tenantId: string) {
-  const variant = await prisma.productVariant.findUnique({
-    where: { id },
-    include: { product: true },
-  });
-  if (!variant) throw new NotFoundError("Variant");
-  if (variant.product.tenantId !== tenantId) throw new ForbiddenError("Variant does not belong to this tenant");
-
-  return prisma.productVariant.update({
-    where: { id },
-    data: { isActive: false },
-  });
+export async function deleteVariant(id: string, _tenantId: string) {
+  return prisma.productVariant.delete({ where: { id } });
 }
 
-// ─── Tags ───
-
-export async function createTag(input: { tenantId: string; name: string; slug?: string }) {
-  const slug = sanitizeSlug(input.slug || input.name);
-  return prisma.tag.create({
-    data: { tenantId: input.tenantId, name: input.name, slug },
-  });
-}
-
-export async function listTags(tenantId: string, args: { take?: number; skip?: number } = {}) {
-  const take = Math.min(args.take ?? 100, 100);
-  return prisma.tag.findMany({
-    where: { tenantId },
-    take,
-    skip: args.skip ?? 0,
-    orderBy: { name: "asc" },
-    include: { _count: { select: { products: true } } },
-  });
-}
-
-export async function updateTag(id: string, input: { name?: string; slug?: string }) {
-  const data: Prisma.TagUpdateInput = { ...input };
-  if (input.slug) data.slug = sanitizeSlug(input.slug);
-  return prisma.tag.update({ where: { id }, data });
-}
-
-export async function deleteTag(id: string) {
-  return prisma.tag.delete({ where: { id } });
-}
-
-// ─── Suppliers ───
-
-export async function createSupplier(input: {
+interface CreateTagArgs {
   tenantId: string;
   name: string;
-  email?: string | null;
-  phone?: string | null;
-  address?: string | null;
-}) {
-  return prisma.supplier.create({
+  slug?: string;
+}
+
+export async function createTag(args: CreateTagArgs) {
+  return prisma.tag.create({
     data: {
-      tenantId: input.tenantId,
-      name: input.name,
-      email: input.email,
-      phone: input.phone,
-      address: input.address,
+      tenantId: args.tenantId,
+      name: args.name,
+      slug: args.slug ?? `${args.name.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`,
     },
   });
 }
 
-export async function listSuppliers(tenantId: string, args: { take?: number; skip?: number } = {}) {
-  return prisma.supplier.findMany({
-    where: { tenantId },
-    take: args.take ?? 100,
-    skip: args.skip ?? 0,
-    orderBy: { name: "asc" },
+interface CreateSupplierArgs {
+  tenantId: string;
+  name: string;
+  email?: string;
+  phone?: string;
+  address?: string;
+}
+
+export async function createSupplier(args: CreateSupplierArgs) {
+  return prisma.supplier.create({
+    data: args,
   });
 }
 
-export async function updateSupplier(
-  id: string,
-  input: { name?: string; email?: string; phone?: string; address?: string }
-) {
-  return prisma.supplier.update({ where: { id }, data: input });
-}
-
-export async function deleteSupplier(id: string) {
-  return prisma.supplier.delete({ where: { id } });
-}
-
-// ─── Attributes ───
-
-export async function createAttribute(input: {
+interface CreateAttributeArgs {
   tenantId: string;
   productId?: string;
   variantId?: string;
   key: string;
   value: string;
-}) {
-  if (!input.productId && !input.variantId) {
-    throw new ValidationError("Either productId or variantId is required");
-  }
+}
 
-  if (input.productId) {
-    const product = await prisma.product.findUnique({
-      where: { id: input.productId },
-      select: { tenantId: true },
-    });
-    if (!product) throw new NotFoundError("Product");
-    if (product.tenantId !== input.tenantId) throw new ForbiddenError("Product does not belong to this tenant");
-  }
-
-  if (input.variantId) {
-    const variant = await prisma.productVariant.findUnique({
-      where: { id: input.variantId },
-      include: { product: { select: { tenantId: true } } },
-    });
-    if (!variant) throw new NotFoundError("Variant");
-    if (variant.product.tenantId !== input.tenantId) throw new ForbiddenError("Variant does not belong to this tenant");
-  }
-
+export async function createAttribute(args: CreateAttributeArgs) {
   return prisma.productAttribute.create({
     data: {
-      productId: input.productId,
-      variantId: input.variantId,
-      key: input.key,
-      value: input.value,
+      key: args.key,
+      value: args.value,
+      productId: args.productId,
+      variantId: args.variantId,
     },
   });
 }
 
-export async function deleteAttribute(id: string) {
-  return prisma.productAttribute.delete({ where: { id } });
+interface GetProductsArgs {
+  categoryId?: string;
+  minPrice?: number;
+  maxPrice?: number;
+  isOrganic?: boolean;
+  isVegan?: boolean;
+  isGlutenFree?: boolean;
+  search?: string;
+  orderBy?: 'price_asc' | 'price_desc' | 'name_asc' | 'rating' | 'newest';
+  first?: number;
+  skip?: number;
+  isFeatured?: boolean;
+  tenantId?: string;
 }
 
-// ─── Stock helpers ───
-
-export async function getProductStock(productId: string, branchId: string) {
-  const result = await getStockCached(productId, branchId, null);
-  return result.found ? result.value : null;
+function getOrderBy(orderBy?: string): Prisma.ProductOrderByWithRelationInput | undefined {
+  switch (orderBy) {
+    case 'price_asc':
+      return { basePrice: 'asc' };
+    case 'price_desc':
+      return { basePrice: 'desc' };
+    case 'name_asc':
+      return { name: 'asc' };
+    case 'newest':
+      return { createdAt: 'desc' };
+    default:
+      return undefined;
+  }
 }
 
-export async function getVariantStock(variantId: string, branchId: string) {
-  const result = await getStockCached(variantId, branchId, variantId);
-  return result.found ? result.value : null;
+function buildWhereClause(args: GetProductsArgs): Prisma.ProductWhereInput {
+  const where: Prisma.ProductWhereInput = {
+    isActive: true,
+    isVisible: true,
+  };
+
+  if (args.tenantId) {
+    where.tenantId = args.tenantId;
+  }
+
+  if (args.categoryId) {
+    where.categoryId = args.categoryId;
+  }
+
+  if (args.isFeatured !== undefined) {
+    where.isFeatured = args.isFeatured;
+  }
+
+  if (args.minPrice !== undefined || args.maxPrice !== undefined) {
+    where.basePrice = {};
+    if (args.minPrice !== undefined) {
+      where.basePrice.gte = args.minPrice;
+    }
+    if (args.maxPrice !== undefined) {
+      where.basePrice.lte = args.maxPrice;
+    }
+  }
+
+  if (args.isOrganic || args.isVegan || args.isGlutenFree) {
+    where.attributes = {
+      some: {
+        AND: [
+          ...(args.isOrganic ? [{ key: 'organic', value: 'true' }] : []),
+          ...(args.isVegan ? [{ key: 'vegan', value: 'true' }] : []),
+          ...(args.isGlutenFree ? [{ key: 'glutenFree', value: 'true' }] : []),
+        ],
+      },
+    };
+  }
+
+  if (args.search) {
+    where.OR = [
+      { name: { contains: args.search, mode: 'insensitive' } },
+      { description: { contains: args.search, mode: 'insensitive' } },
+      { sku: { contains: args.search, mode: 'insensitive' } },
+    ];
+  }
+
+  return where;
 }
 
-export async function getBatchProductStock(
-  items: { productId: string; branchId: string }[]
-): Promise<(number | null)[]> {
-  if (items.length === 0) return [];
-  const keys: BatchStockKey[] = items.map((item) => ({
-    productId: item.productId,
-    branchId: item.branchId,
-  }));
-  return getBatchStockCached(keys);
+export async function getProducts(args: GetProductsArgs) {
+  const cacheKey = `products:${JSON.stringify(args)}`;
+
+  try {
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached);
+    }
+  } catch (err) {
+    console.warn('Redis cache miss or error:', err);
+  }
+
+  const where = buildWhereClause(args);
+  const orderBy = getOrderBy(args.orderBy);
+  const first = args.first || 20;
+  const skip = args.skip || 0;
+
+  const [products, totalCount] = await Promise.all([
+    prisma.product.findMany({
+      where,
+      include: {
+        images: {
+          where: { productId: { not: null } },
+          take: 1,
+          orderBy: { position: 'asc' },
+        },
+        category: true,
+        attributes: true,
+        reviews: {
+          where: { isApproved: true },
+          select: { rating: true },
+        },
+      },
+      orderBy,
+      take: first,
+      skip,
+    }),
+    prisma.product.count({ where }),
+  ]);
+
+  const productsWithRating = products.map((product) => {
+    const reviews = (product as { reviews: { rating: number }[] }).reviews;
+    return {
+      ...product,
+      averageRating:
+        reviews.length > 0
+          ? reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length
+          : null,
+      reviewCount: reviews.length,
+      reviews: undefined,
+    };
+  });
+
+  const result = {
+    products: productsWithRating,
+    totalCount,
+    hasMore: skip + products.length < totalCount,
+  };
+
+  try {
+    await redis.setex(cacheKey, CACHE_TTL, JSON.stringify(result));
+  } catch (err) {
+    console.warn('Redis cache set error:', err);
+  }
+
+  return result;
 }
+
+export async function getProductBySlug(slug: string, tenantId: string) {
+  const cacheKey = `product:${tenantId}:${slug}`;
+
+  try {
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached);
+    }
+  } catch (err) {
+    console.warn('Redis cache miss or error:', err);
+  }
+
+  const product = await prisma.product.findFirst({
+    where: {
+      slug,
+      tenantId,
+      isActive: true,
+      isVisible: true,
+    },
+    include: {
+      images: {
+        orderBy: { position: 'asc' },
+      },
+      category: true,
+      attributes: true,
+      variants: {
+        where: { isActive: true },
+        include: {
+          attributes: true,
+          images: true,
+        },
+      },
+      reviews: {
+        where: { isApproved: true },
+        include: {
+          customer: {
+            select: {
+              firstName: true,
+              lastName: true,
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      },
+      suppliers: {
+        select: {
+          supplier: { select: { name: true } },
+        },
+      },
+    },
+  });
+
+  if (!product) {
+    return null;
+  }
+
+  const averageRating =
+    product.reviews.length > 0
+      ? product.reviews.reduce((sum, r) => sum + r.rating, 0) / product.reviews.length
+      : null;
+
+  const result = {
+    ...product,
+    averageRating,
+    reviewCount: product.reviews.length,
+  };
+
+  try {
+    await redis.setex(cacheKey, CACHE_TTL, JSON.stringify(result));
+  } catch (err) {
+    console.warn('Redis cache set error:', err);
+  }
+
+  return result;
+}
+
+export async function getRelatedProducts(productId: string, categoryId: string | null, tenantId: string) {
+  const cacheKey = `related:${tenantId}:${productId}`;
+
+  try {
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached);
+    }
+  } catch (err) {
+    console.warn('Redis cache miss or error:', err);
+  }
+
+  const where: Prisma.ProductWhereInput = {
+    tenantId,
+    isActive: true,
+    isVisible: true,
+    id: { not: productId },
+    ...(categoryId ? { categoryId } : {}),
+  };
+
+  const [products, totalCount] = await Promise.all([
+    prisma.product.findMany({
+      where,
+      include: {
+        images: {
+          take: 1,
+          orderBy: { position: 'asc' },
+        },
+        attributes: true,
+      },
+      take: 4,
+      orderBy: { isFeatured: 'desc' },
+    }),
+    prisma.product.count({ where }),
+  ]);
+
+  const result = {
+    products,
+    totalCount,
+    hasMore: products.length < totalCount,
+  };
+
+  try {
+    await redis.setex(cacheKey, CACHE_TTL, JSON.stringify(result));
+  } catch (err) {
+    console.warn('Redis cache set error:', err);
+  }
+
+  return result;
+}
+
+export async function invalidateProductCache(tenantId: string, slug?: string) {
+  const pattern = `products:*`;
+  const keys = await redis.keys(pattern);
+
+  if (keys.length > 0) {
+    await redis.del(...keys);
+  }
+
+  if (slug) {
+    await redis.del(`product:${tenantId}:${slug}`);
+    await redis.del(`related:${tenantId}:${slug}`);
+  }
+}
+
+export async function searchProducts(query: string, tenantId: string, first = 10) {
+  const cacheKey = `search:${tenantId}:${query}:${first}`;
+
+  try {
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached);
+    }
+  } catch (err) {
+    console.warn('Redis cache miss or error:', err);
+  }
+
+  const products = await prisma.product.findMany({
+    where: {
+      tenantId,
+      isActive: true,
+      isVisible: true,
+      OR: [
+        { name: { contains: query, mode: 'insensitive' } },
+        { description: { contains: query, mode: 'insensitive' } },
+        { sku: { contains: query, mode: 'insensitive' } },
+      ],
+    },
+    include: {
+      images: {
+        take: 1,
+        orderBy: { position: 'asc' },
+      },
+      category: true,
+    },
+    take: first,
+    orderBy: { name: 'asc' },
+  });
+
+  try {
+    await redis.setex(cacheKey, CACHE_TTL, JSON.stringify(products));
+  } catch (err) {
+    console.warn('Redis cache set error:', err);
+  }
+
+  return products;
+}
+
+export { redis, prisma };

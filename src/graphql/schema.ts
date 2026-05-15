@@ -11,5 +11,10 @@ import "@modules/customers/resolver";
 import "@modules/cart/resolver";
 import "@modules/orders/resolver";
 import "@modules/checkout/resolver";
+import "@modules/coupons/resolver";
+import "@modules/categories/resolver";
+import "@modules/reviews/resolver";
+import "@modules/newsletter/resolver";
+import "@modules/loyalty/resolver";
 
 export const schema = builder.toSchema();

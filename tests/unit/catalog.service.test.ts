@@ -149,6 +149,10 @@ describe("Catalog Service", () => {
 
   describe("createVariant", () => {
     it("creates variant with correct product relation", async () => {
+      vi.mocked(mockedPrisma.product.findUnique).mockResolvedValue({
+        id: "prod-1",
+        tenantId: "tenant-1",
+      });
       vi.mocked(mockedPrisma.productVariant.create).mockResolvedValue({
         id: "var-1",
         productId: "prod-1",
@@ -165,17 +169,31 @@ describe("Catalog Service", () => {
         sku: "SKU-001",
         name: "Variant A",
         price: 50,
-      });
+      }, "tenant-1");
 
       expect(result.sku).toBe("SKU-001");
       expect(mockedPrisma.productVariant.create).toHaveBeenCalledWith({
         data: expect.objectContaining({ productId: "prod-1" }),
+        include: { product: true, attributes: true, images: true },
       });
     });
   });
 
   describe("updateVariant", () => {
     it("updates variant fields", async () => {
+      vi.mocked(mockedPrisma.productVariant.findUnique).mockResolvedValue({
+        id: "var-1",
+        productId: "prod-1",
+        sku: "SKU-001",
+        name: "Variant A",
+        price: 50,
+        isActive: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        product: { id: "prod-1", tenantId: "tenant-1", name: "Test", slug: "test", basePrice: 100, description: null, sku: null, isActive: true, isVisible: true, createdAt: new Date(), updatedAt: new Date() },
+        attributes: [],
+        images: [],
+      });
       vi.mocked(mockedPrisma.productVariant.update).mockResolvedValue({
         id: "var-1",
         productId: "prod-1",
@@ -187,7 +205,7 @@ describe("Catalog Service", () => {
         updatedAt: new Date(),
       });
 
-      const result = await updateVariant("var-1", { name: "Updated", price: 75 });
+      const result = await updateVariant("var-1", { name: "Updated", price: 75 }, "tenant-1");
       expect(result.name).toBe("Updated");
     });
   });

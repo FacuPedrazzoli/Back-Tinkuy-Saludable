@@ -65,7 +65,7 @@ async function sleep(ms: number): Promise<void> {
 
 async function acquireLock(key: string): Promise<boolean> {
   if (!(await isRedisAvailable())) {
-    return true;
+    return false;
   }
 
   const fullLockKey = lockKey(key);
@@ -81,7 +81,7 @@ async function acquireLock(key: string): Promise<boolean> {
 
 async function releaseLock(key: string): Promise<void> {
   if (!(await isRedisAvailable())) {
-    return;
+    throw new Error("Redis unavailable - cannot release lock");
   }
   await redis.del(lockKey(key));
 }

@@ -19,6 +19,8 @@ export class AuthenticationError extends AppError {
   }
 }
 
+export const AuthError = AuthenticationError;
+
 export class ForbiddenError extends AppError {
   constructor(message = "Access denied") {
     super("FORBIDDEN", message, 403);

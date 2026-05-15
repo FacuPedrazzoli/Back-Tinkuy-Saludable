@@ -36,6 +36,8 @@ export async function createOrderFromCheckout(input: {
   }[];
   totalAmount: number;
 }) {
+  const subtotal = input.items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+
   return prisma.$transaction(async (tx) => {
     const productIds = input.items.map((i) => i.productId);
     const products = await tx.product.findMany({
@@ -88,6 +90,7 @@ export async function createOrderFromCheckout(input: {
         paymentStatus: "pending",
         paymentId: input.paymentId,
         preferenceId: input.preferenceId,
+        subtotal,
         totalAmount: input.totalAmount,
         items: {
           create: input.items.map((item) => ({
@@ -241,13 +244,13 @@ export async function getGuestOrders(email: string, tenantId: string, args: { ta
     take: args.take ?? 20,
     skip: args.skip ?? 0,
     orderBy: { createdAt: "desc" },
-    include: { items: true, branch: true },
+    include: { items: { include: { product: true, variant: true } }, branch: true },
   });
 }
 
 export async function updateOrderPaymentStatus(
   orderId: string,
-  paymentStatus: "pending" | "approved" | "rejected" | "cancelled" | "refunded"
+  paymentStatus: "pending" | "approved" | "rejected"
 ) {
   return prisma.$transaction(async (tx) => {
     const order = await tx.order.findUnique({
@@ -259,7 +262,7 @@ export async function updateOrderPaymentStatus(
       throw new NotFoundError("Order");
     }
 
-    if (paymentStatus === "rejected" || paymentStatus === "cancelled") {
+    if (paymentStatus === "rejected") {
       const stockMovementData = order.items.map((item) => ({
         tenantId: order.tenantId,
         branchId: order.branchId,
@@ -286,4 +289,82 @@ export async function updateOrderPaymentStatus(
       data: { paymentStatus },
     });
   });
+}
+
+export async function getRecentOrders(tenantId: string, limit: number = 10) {
+  return prisma.order.findMany({
+    where: { tenantId },
+    take: limit,
+    orderBy: { createdAt: "desc" },
+    include: {
+      items: { include: { product: true, variant: true } },
+      customer: true,
+    },
+  });
+}
+
+export async function getAdminMetrics(tenantId: string) {
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  const [
+    totalOrders,
+    pendingOrders,
+    totalCustomers,
+    totalProducts,
+    ordersThisMonth,
+    ordersToday,
+  ] = await Promise.all([
+    prisma.order.count({ where: { tenantId } }),
+    prisma.order.count({ where: { tenantId, status: "pending" } }),
+    prisma.customer.count({ where: { tenantId } }),
+    prisma.product.count({ where: { tenantId, isActive: true } }),
+    prisma.order.findMany({
+      where: { tenantId, createdAt: { gte: startOfMonth } },
+      select: { totalAmount: true },
+    }),
+    prisma.order.findMany({
+      where: { tenantId, createdAt: { gte: startOfToday } },
+      select: { totalAmount: true },
+    }),
+  ]);
+
+  const revenueThisMonth = ordersThisMonth.reduce((sum, o) => sum + Number(o.totalAmount), 0);
+  const revenueToday = ordersToday.reduce((sum, o) => sum + Number(o.totalAmount), 0);
+  const avgOrderValue = totalOrders > 0 ? revenueThisMonth / totalOrders : 0;
+
+  return {
+    totalOrders,
+    pendingOrders,
+    totalCustomers,
+    totalProducts,
+    revenueToday,
+    revenueThisMonth,
+    avgOrderValue,
+  };
+}
+
+export async function getTopProducts(tenantId: string, limit: number = 5) {
+  const result = await prisma.$queryRaw<{ productId: string; productName: string; quantity: bigint; totalPrice: string }[]>`
+    SELECT
+      oi."productId",
+      oi.name as "productName",
+      SUM(oi.quantity)::bigint as quantity,
+      SUM(oi.price * oi.quantity)::text as "totalPrice"
+    FROM "OrderItem" oi
+    INNER JOIN "Order" o ON o.id = oi."orderId"
+    WHERE o."tenantId" = ${tenantId}
+      AND o.status IN ('pending', 'confirmed')
+    GROUP BY oi."productId", oi.name
+    ORDER BY quantity DESC
+    LIMIT ${limit}
+  `;
+
+  return result.map((row) => ({
+    productId: row.productId,
+    productName: row.productName,
+    quantity: Number(row.quantity),
+    totalPrice: parseFloat(row.totalPrice),
+  }));
 }

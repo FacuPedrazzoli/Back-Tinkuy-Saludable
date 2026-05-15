@@ -20,13 +20,13 @@ const STOCK_MOVEMENT_TYPES = ["INBOUND", "OUTBOUND", "ADJUSTMENT", "TRANSFER"] a
 
 const CreateStockMovementInput = builder.inputType("CreateStockMovementInput", {
   fields: (t) => ({
-    branchId: t.string({ required: true, maxLength: 64 }),
-    productId: t.string({ required: true, maxLength: 64 }),
-    variantId: t.string({ maxLength: 64 }),
+    branchId: t.string({ required: true, validate: { maxLength: 64 } }),
+    productId: t.string({ required: true, validate: { maxLength: 64 } }),
+    variantId: t.string({ validate: { maxLength: 64 } }),
     type: t.string({ required: true }),
-    quantity: t.int({ required: true, minValue: 1, maxValue: 1000000 }),
-    reason: t.string({ maxLength: 500 }),
-    referenceId: t.string({ maxLength: 64 }),
+    quantity: t.int({ required: true, validate: { min: 1, max: 1000000 } }),
+    reason: t.string({ validate: { maxLength: 500 } }),
+    referenceId: t.string({ validate: { maxLength: 64 } }),
   }),
 });
 
@@ -58,7 +58,7 @@ builder.queryField("stockMovements", (t) =>
     authScopes: { manager: true },
     resolve: async (_parent, args, ctx) => {
       if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
-      if (args.take > 100) {
+      if ((args.take ?? 20) > 100) {
         throw new ValidationError("Take cannot exceed 100");
       }
       return inventoryService.listStockMovements({

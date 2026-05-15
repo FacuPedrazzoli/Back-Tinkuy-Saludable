@@ -83,7 +83,8 @@ async function processWebhookWithTimeout(req: Request, res: Response): Promise<R
       if (existingEvent) {
         const updated = await tx.webhookEvent.updateMany({
           where: {
-            source_eventId: { source: "mercadopago", eventId: paymentId },
+            source: "mercadopago",
+            eventId: paymentId,
             processed: false,
           },
           data: { payload: payload as any, processed: true },
@@ -107,9 +108,10 @@ async function processWebhookWithTimeout(req: Request, res: Response): Promise<R
     });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
-      return null;
+      event = null;
+    } else {
+      throw error;
     }
-    throw error;
   }
 
   if (!event) {
@@ -129,6 +131,7 @@ async function processWebhookWithTimeout(req: Request, res: Response): Promise<R
     }
   } catch (err) {
     console.error("Error processing webhook:", err);
+    return res.status(500).json({ error: "Webhook processing failed" });
   }
 
   return res.status(200).json({ received: true });

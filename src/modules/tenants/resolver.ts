@@ -1,7 +1,6 @@
 import { builder } from "@graphql/builder";
 import * as tenantService from "./service";
 import { ForbiddenError } from "@lib/errors";
-import { rateLimitGeneral } from "@lib/rate-limit";
 
 // ─── Types ───
 
@@ -34,33 +33,33 @@ export const Branch = builder.prismaObject("Branch", {
 
 const CreateTenantInput = builder.inputType("CreateTenantInput", {
   fields: (t) => ({
-    name: t.string({ required: true, maxLength: 255 }),
-    slug: t.string({ required: true, maxLength: 120 }),
-    branchName: t.string({ maxLength: 255 }),
+    name: t.string({ required: true, validate: { maxLength: 255 } }),
+    slug: t.string({ required: true, validate: { maxLength: 120 } }),
+    branchName: t.string({ validate: { maxLength: 255 } }),
   }),
 });
 
 const UpdateTenantInput = builder.inputType("UpdateTenantInput", {
   fields: (t) => ({
-    name: t.string({ maxLength: 255 }),
+    name: t.string({ validate: { maxLength: 255 } }),
     isActive: t.boolean(),
   }),
 });
 
 const CreateBranchInput = builder.inputType("CreateBranchInput", {
   fields: (t) => ({
-    tenantId: t.string({ required: true, maxLength: 64 }),
-    name: t.string({ required: true, maxLength: 255 }),
-    address: t.string({ maxLength: 500 }),
-    phone: t.string({ maxLength: 20 }),
+    tenantId: t.string({ required: true, validate: { maxLength: 64 } }),
+    name: t.string({ required: true, validate: { maxLength: 255 } }),
+    address: t.string({ validate: { maxLength: 500 } }),
+    phone: t.string({ validate: { maxLength: 20 } }),
   }),
 });
 
 const UpdateBranchInput = builder.inputType("UpdateBranchInput", {
   fields: (t) => ({
-    name: t.string({ maxLength: 255 }),
-    address: t.string({ maxLength: 500 }),
-    phone: t.string({ maxLength: 20 }),
+    name: t.string({ validate: { maxLength: 255 } }),
+    address: t.string({ validate: { maxLength: 500 } }),
+    phone: t.string({ validate: { maxLength: 20 } }),
     isActive: t.boolean(),
   }),
 });

@@ -31,7 +31,7 @@ export const OrderItem = builder.prismaObject("OrderItem", {
     quantity: t.exposeInt("quantity"),
     total: t.field({ type: "Decimal", resolve: (item) => String(item.total) }),
     product: t.relation("product"),
-    variant: t.relation("variant", { nullable: true }),
+    variant: t.relation("variant"),
   }),
 });
 
@@ -39,7 +39,7 @@ const ORDER_STATUSES = ["pending", "confirmed", "cancelled", "refunded"] as cons
 
 const UpdateOrderStatusInput = builder.inputType("UpdateOrderStatusInput", {
   fields: (t) => ({
-    status: t.string({ required: true, maxLength: 20 }),
+    status: t.string({ required: true }),
   }),
 });
 
@@ -153,6 +153,98 @@ builder.mutationField("updateOrderStatus", (t) =>
         input.status as "pending" | "confirmed" | "cancelled" | "refunded",
         ctx.tenantId
       );
+    },
+  })
+);
+
+const RecentOrder = builder.objectRef<{ id: string; orderNumber: string; customerName: string; customerEmail: string; total: number; status: string; paymentStatus: string; createdAt: Date }>("RecentOrder").implement({
+  fields: (t) => ({
+    id: t.exposeID("id"),
+    orderNumber: t.exposeString("orderNumber"),
+    customerName: t.exposeString("customerName"),
+    customerEmail: t.exposeString("customerEmail"),
+    total: t.exposeFloat("total"),
+    status: t.exposeString("status"),
+    paymentStatus: t.exposeString("paymentStatus"),
+    createdAt: t.expose("createdAt", { type: "DateTime" }),
+  }),
+});
+
+const TopProduct = builder.objectRef<{ productName: string; quantity: number; totalPrice: number }>("TopProduct").implement({
+  fields: (t) => ({
+    productName: t.exposeString("productName"),
+    quantity: t.exposeInt("quantity"),
+    totalPrice: t.exposeFloat("totalPrice"),
+  }),
+});
+
+const AdminMetrics = builder.objectRef<{
+  totalOrders: number;
+  pendingOrders: number;
+  totalCustomers: number;
+  totalProducts: number;
+  revenueToday: number;
+  revenueThisMonth: number;
+  avgOrderValue: number;
+}>("AdminMetrics").implement({
+  fields: (t) => ({
+    totalOrders: t.exposeInt("totalOrders"),
+    pendingOrders: t.exposeInt("pendingOrders"),
+    totalCustomers: t.exposeInt("totalCustomers"),
+    totalProducts: t.exposeInt("totalProducts"),
+    revenueToday: t.exposeFloat("revenueToday"),
+    revenueThisMonth: t.exposeFloat("revenueThisMonth"),
+    avgOrderValue: t.exposeFloat("avgOrderValue"),
+  }),
+});
+
+builder.queryField("adminMetrics", (t) =>
+  t.field({
+    type: AdminMetrics,
+    authScopes: { manager: true },
+    resolve: async (_parent, _args, ctx) => {
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      return orderService.getAdminMetrics(ctx.tenantId);
+    },
+  })
+);
+
+builder.queryField("recentOrders", (t) =>
+  t.field({
+    type: [RecentOrder],
+    args: {
+      limit: t.arg.int({ defaultValue: 10 }),
+    },
+    authScopes: { manager: true },
+    resolve: async (_parent, args, ctx) => {
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      const orders = await orderService.getRecentOrders(ctx.tenantId, args.limit ?? 10);
+      return orders.map((order) => ({
+        id: order.id,
+        orderNumber: `#${order.id.slice(0, 8).toUpperCase()}`,
+        customerName: order.customer?.firstName
+          ? `${order.customer.firstName} ${order.customer.lastName || ""}`.trim()
+          : "Cliente",
+        customerEmail: order.customer?.email || order.guestEmail || "-",
+        total: Number(order.totalAmount),
+        status: order.status,
+        paymentStatus: order.paymentStatus,
+        createdAt: order.createdAt,
+      }));
+    },
+  })
+);
+
+builder.queryField("topProducts", (t) =>
+  t.field({
+    type: [TopProduct],
+    args: {
+      limit: t.arg.int({ defaultValue: 5 }),
+    },
+    authScopes: { manager: true },
+    resolve: async (_parent, args, ctx) => {
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      return orderService.getTopProducts(ctx.tenantId, args.limit ?? 5);
     },
   })
 );

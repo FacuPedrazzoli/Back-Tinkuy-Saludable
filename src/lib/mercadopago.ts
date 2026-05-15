@@ -108,23 +108,6 @@ export async function createPreference(input: {
   } catch (err) {
     clearTimeout(timeoutId);
     logger.error({ err, component: "mercadopago" }, "MercadoPago preference creation failed");
-    if (process.env.NODE_ENV === "production") {
-      throw new Error("MercadoPago preference creation failed");
-    }
-    return {
-      id: `mock-pref-${Date.now()}`,
-      init_point: `https://www.mercadopago.com.ar/checkout/start?pref_id=${Date.now()}`,
-      sandbox_init_point: `https://sandbox.mercadopago.com.ar/checkout/start?pref_id=${Date.now()}`,
-      collector_id: 123456789,
-      operation_type: "regular_payment",
-      status: "pending",
-      items: input.items,
-      payer: input.payer,
-      back_urls: input.back_urls,
-      auto_return: "approved",
-      external_reference: input.external_reference,
-      date_created: new Date().toISOString(),
-      date_expiration: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-    };
+    throw new Error("MercadoPago preference creation failed");
   }
 }
