@@ -11,6 +11,8 @@ import type { AdminTokenPayload, CustomerTokenPayload } from "@lib/jwt";
 import { passwordSchema } from "@lib/validation";
 import { logger } from "@lib/logger";
 import type { UserType } from "@prisma/client";
+import { sendEmail } from "@lib/email";
+import { welcomeEmail } from "@emails/welcome";
 
 const SALT_ROUNDS = 12;
 const REFRESH_TOKEN_EXPIRY_DAYS = 30;
@@ -131,6 +133,10 @@ export async function customerRegister(input: {
     role: "customer",
     tenantId: customer.tenantId,
   };
+
+  sendEmail(welcomeEmail({ firstName: customer.firstName, email: customer.email })).catch((err) =>
+    logger.error({ err, component: "email", type: "welcome" }, "Failed to send welcome email")
+  );
 
   return {
     token: signCustomerToken(payload),

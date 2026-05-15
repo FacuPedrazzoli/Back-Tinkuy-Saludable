@@ -1,6 +1,9 @@
 import { builder } from "@/graphql/builder";
 import { prisma } from "@/lib/prisma";
 import { ValidationError } from "@/lib/errors";
+import { sendEmail } from "@/lib/email";
+import { newsletterWelcomeEmail } from "@/emails/newsletter-welcome";
+import { logger } from "@/lib/logger";
 
 const NewsletterSubscriber = builder.prismaObject("NewsletterSubscriber", {
   fields: (t) => ({
@@ -54,8 +57,9 @@ builder.mutationField("subscribeToNewsletter", (t) =>
         where: { email },
       });
 
+      let subscriber;
       if (existing?.unsubscribedAt) {
-        return prisma.newsletterSubscriber.update({
+        subscriber = await prisma.newsletterSubscriber.update({
           where: { email },
           data: {
             isActive: true,
@@ -63,18 +67,22 @@ builder.mutationField("subscribeToNewsletter", (t) =>
             source: args.source,
           },
         });
-      }
-
-      if (existing?.isActive) {
+      } else if (existing?.isActive) {
         throw new ValidationError("Este email ya está suscripto");
+      } else {
+        subscriber = await prisma.newsletterSubscriber.create({
+          data: {
+            email,
+            source: args.source,
+          },
+        });
       }
 
-      return prisma.newsletterSubscriber.create({
-        data: {
-          email,
-          source: args.source,
-        },
-      });
+      sendEmail(newsletterWelcomeEmail({ email })).catch((err) =>
+        logger.error({ err, component: "email", type: "newsletterWelcome" }, "Failed to send newsletter welcome email")
+      );
+
+      return subscriber;
     },
   })
 );

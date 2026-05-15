@@ -91,6 +91,7 @@ export async function createCheckout(input: {
     payer: input.guestEmail
       ? { email: input.guestEmail }
       : undefined,
+    expiration_date_to: new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString(),
   });
 
   if (!preference.id) {

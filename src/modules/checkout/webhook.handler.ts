@@ -6,6 +6,9 @@ import { prisma } from "@lib/prisma";
 import { ValidationError } from "@lib/errors";
 import { clearCart, getValidatedCartSnapshot, clearValidatedCartSnapshot } from "@modules/cart/service";
 import { createOrderFromCheckout, updateOrderPaymentStatus } from "@modules/orders/service";
+import { sendEmail } from "@lib/email";
+import { orderConfirmationEmail } from "@emails/order-confirmation";
+import { logger } from "@lib/logger";
 
 const mpConfig = new MercadoPagoConfig({
   accessToken: process.env.MP_ACCESS_TOKEN ?? "",
@@ -202,8 +205,9 @@ async function processApprovedPayment(payload: any, mpPayment: any) {
 
   const cartId = payload.data?.external_reference?.split(":")[2] ?? "";
 
+  let createdOrder: any;
   try {
-    await createOrderFromCheckout({
+    createdOrder = await createOrderFromCheckout({
       tenantId,
       branchId,
       customerId: isUserCart ? cartId : undefined,
@@ -225,6 +229,32 @@ async function processApprovedPayment(payload: any, mpPayment: any) {
       console.log("Order already exists for paymentId:", paymentId);
     } else {
       throw error;
+    }
+  }
+
+  if (createdOrder) {
+    const orderEmail = createdOrder.customer?.email ?? guestEmail;
+    const orderFirstName = createdOrder.customer?.firstName ?? "Cliente";
+    if (orderEmail) {
+      sendEmail(
+        orderConfirmationEmail({
+          email: orderEmail,
+          firstName: orderFirstName,
+          orderId: createdOrder.id,
+          items: createdOrder.items.map((item: any) => ({
+            name: item.name,
+            sku: item.sku,
+            price: Number(item.price),
+            quantity: item.quantity,
+          })),
+          subtotal: Number(createdOrder.subtotal),
+          discountAmount: Number(createdOrder.discountAmount),
+          shippingCost: createdOrder.shippingCost ? Number(createdOrder.shippingCost) : undefined,
+          totalAmount: Number(createdOrder.totalAmount),
+        })
+      ).catch((err) =>
+        logger.error({ err, component: "email", type: "orderConfirmation" }, "Failed to send order confirmation email")
+      );
     }
   }
 

@@ -23,7 +23,8 @@
       "@/*": ["src/*"],
       "@lib/*": ["src/lib/*"],
       "@modules/*": ["src/modules/*"],
-      "@graphql/*": ["src/graphql/*"]
+      "@graphql/*": ["src/graphql/*"],
+      "@emails/*": ["src/emails/*"]
     }
   },
   "include": ["src/**/*"],

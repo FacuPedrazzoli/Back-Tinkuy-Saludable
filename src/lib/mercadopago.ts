@@ -43,9 +43,11 @@ export async function createPreference(input: {
     name?: string;
     surname?: string;
   };
+  expiration_date_to?: string;
 }) {
   const isTestMode = MP_MODE === "test" || !isMercadoPagoConfigured();
   if (isTestMode) {
+    const expirationDate = input.expiration_date_to ?? new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString();
     return {
       id: `mock-pref-${Date.now()}`,
       init_point: `https://www.mercadopago.com.ar/checkout/start?pref_id=${Date.now()}`,
@@ -59,7 +61,7 @@ export async function createPreference(input: {
       auto_return: "approved",
       external_reference: input.external_reference,
       date_created: new Date().toISOString(),
-      date_expiration: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+      expiration_date_to: expirationDate,
     };
   }
 
@@ -88,6 +90,9 @@ export async function createPreference(input: {
                 surname: input.payer.surname,
               }
             : undefined,
+          ...(input.expiration_date_to && {
+            expiration_date_to: input.expiration_date_to,
+          }),
         },
       }) as PreferenceResponse;
     } catch (err: unknown) {

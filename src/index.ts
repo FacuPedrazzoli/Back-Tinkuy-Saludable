@@ -26,6 +26,7 @@ import { logger } from "@lib/logger";
 import { requestLoggingMiddleware } from "@lib/request-logger";
 import { getMetricsSummary, getMetrics } from "@lib/metrics";
 import { initSentry, sentryHandlers } from "@lib/sentry";
+import { startAbandonedCartJob } from "@/jobs/abandonedCart";
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 4000;
@@ -333,6 +334,10 @@ async function bootstrap() {
     setInterval(() => {
       getMetricsSummary();
     }, 60000);
+
+    if (process.env.NODE_ENV === "production") {
+      startAbandonedCartJob();
+    }
   });
 }
 
