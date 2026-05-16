@@ -49,7 +49,7 @@ async function processWebhookWithTimeout(req: Request, res: Response): Promise<R
   const rawPayload = Buffer.isBuffer(req.body) ? req.body.toString() : JSON.stringify(req.body);
   const isValid = verifyMercadoPagoSignature(rawPayload, signature, webhookSecret);
   if (!isValid) {
-    logger.error('Invalid webhook signature');
+    logger.error({ component: 'webhook' }, 'Invalid webhook signature');
     return res.status(401).json({ error: "Invalid webhook signature" });
   }
 
@@ -130,7 +130,7 @@ async function processWebhookWithTimeout(req: Request, res: Response): Promise<R
       } else if (status === "rejected" || status === "cancelled") {
         await processRejectedOrCancelledPayment(payload, mpPayment);
       } else if (status === "pending") {
-        await processPendingPayment(payload, mpPayment);
+        await processPendingPayment(payload);
       } else if (status === "refunded") {
         await processRefundedPayment(payload, mpPayment);
       }
@@ -263,7 +263,7 @@ async function processApprovedPayment(payload: any, mpPayment: any) {
   await clearValidatedCartSnapshot(preferenceId, tenantId);
 }
 
-async function processPendingPayment(payload: any, mpPayment: any) {
+async function processPendingPayment(payload: any) {
   const paymentId = String(payload.data?.id);
   const preferenceId = payload.data?.preference_id;
   
@@ -301,7 +301,7 @@ async function processRefundedPayment(payload: any, mpPayment: any) {
     
     await prisma.order.update({
       where: { id: orderId },
-      data: { status: 'REFUNDED' },
+      data: { status: 'refunded' },
     });
     
     logger.info({ orderId }, 'Order marked as refunded');

@@ -1,11 +1,20 @@
 import { builder } from '../builder'
 
-export class PageInfo extends builder.objectType() {
-  hasNextPage!: boolean
-  hasPreviousPage!: boolean
-  startCursor!: string | null
-  endCursor!: string | null
-}
+const PageInfoRef = builder.objectRef<{
+  hasNextPage: boolean
+  hasPreviousPage: boolean
+  startCursor: string | null
+  endCursor: string | null
+}>('PageInfo').implement({
+  fields: (t) => ({
+    hasNextPage: t.exposeBoolean('hasNextPage'),
+    hasPreviousPage: t.exposeBoolean('hasPreviousPage'),
+    startCursor: t.exposeString('startCursor', { nullable: true }),
+    endCursor: t.exposeString('endCursor', { nullable: true }),
+  }),
+})
+
+export { PageInfoRef as PageInfo }
 
 export function encodeCursor(data: string): string {
   return Buffer.from(data).toString('base64url')
@@ -22,6 +31,11 @@ export interface Edge<Node> {
 
 export interface Connection<Node> {
   edges: Edge<Node>[]
-  pageInfo: PageInfo
+  pageInfo: {
+    hasNextPage: boolean
+    hasPreviousPage: boolean
+    startCursor: string | null
+    endCursor: string | null
+  }
   totalCount: number
 }

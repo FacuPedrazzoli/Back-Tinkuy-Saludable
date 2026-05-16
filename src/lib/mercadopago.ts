@@ -4,7 +4,7 @@ import { mpCircuitBreaker } from "./circuit-breaker";
 import { logger } from "./logger";
 
 const mpConfig = new MercadoPagoConfig({
-  accessToken: config.mercadoPago.accessToken,
+  accessToken: config.mercadoPago.accessToken || '',
 });
 
 export const preferenceClient = new Preference(mpConfig);

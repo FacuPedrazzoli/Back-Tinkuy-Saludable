@@ -738,9 +738,11 @@ model Wishlist {
   productId  String
   product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
   variantId  String?
+  variant    ProductVariant? @relation(fields: [variantId], references: [id], onDelete: Cascade)
   createdAt  DateTime @default(now())
 
   @@unique([customerId, productId, variantId])
   @@index([customerId])
   @@index([productId])
+  @@index([variantId])
 }
