@@ -3,6 +3,8 @@ import * as catalogService from "./service";
 import { moneySchema } from "@lib/validation";
 import { ValidationError, ForbiddenError } from "@lib/errors";
 import { rateLimitGeneral } from "@lib/rate-limit";
+import { encodeCursor, decodeCursor, PageInfo } from "@graphql/types/connection";
+import { prisma } from "@lib/prisma";
 
 // ─── Types ───
 
@@ -193,41 +195,113 @@ const CreateAttributeInput = builder.inputType("CreateAttributeInput", {
   }),
 });
 
-// ─── Queries ───
+// ─── Connection Types ───
 
-interface ProductListShape {
-  items: Awaited<ReturnType<typeof catalogService.listProducts>>["items"];
-  count: number;
-}
-
-const ProductList = builder.objectRef<ProductListShape>("ProductList").implement({
-  fields: (t2) => ({
-    items: t2.field({ type: [Product], resolve: (parent) => parent.items }),
-    count: t2.exposeInt("count"),
+const ProductEdge = builder.objectRef<{ node: unknown; cursor: string }>("ProductEdge").implement({
+  fields: (t) => ({
+    node: t.field({
+      type: Product,
+      resolve: (parent) => parent.node as any,
+    }),
+    cursor: t.exposeString("cursor"),
   }),
 });
 
+const ProductConnection = builder.objectRef<{
+  edges: { node: unknown; cursor: string }[];
+  pageInfo: { hasNextPage: boolean; hasPreviousPage: boolean; startCursor: string | null; endCursor: string | null };
+  totalCount: number;
+}>("ProductConnection").implement({
+  fields: (t) => ({
+    edges: t.field({
+      type: [ProductEdge],
+      resolve: (parent) => parent.edges,
+    }),
+    pageInfo: t.field({
+      type: PageInfo,
+      resolve: (parent) => parent.pageInfo,
+    }),
+    totalCount: t.exposeInt("totalCount"),
+  }),
+});
+
+// ─── Queries ───
+
 builder.queryField("products", (t) =>
   t.field({
-    type: ProductList,
+    type: ProductConnection,
     args: {
       search: t.arg.string(),
       tagSlug: t.arg.string(),
       isVisible: t.arg.boolean({ defaultValue: true }),
-      take: t.arg.int({ defaultValue: 20 }),
-      skip: t.arg.int({ defaultValue: 0 }),
+      first: t.arg.int(),
+      after: t.arg.string(),
     },
     authScopes: { public: true },
     resolve: async (_parent, args, ctx) => {
       if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
-      return catalogService.listProducts({
+
+      const first = args.first ?? 20;
+      const cursor = args.after ? decodeCursor(args.after) : undefined;
+
+      const where: Record<string, unknown> = {
         tenantId: ctx.tenantId,
-        search: args.search ?? undefined,
-        tagSlug: args.tagSlug ?? undefined,
-        isVisible: args.isVisible ?? undefined,
-        take: args.take ?? 20,
-        skip: args.skip ?? 0,
-      });
+      };
+
+      if (args.isVisible !== undefined) {
+        where.isVisible = args.isVisible;
+      }
+
+      if (args.search) {
+        where.OR = [
+          { name: { contains: args.search, mode: 'insensitive' } },
+          { description: { contains: args.search, mode: 'insensitive' } },
+          { sku: { contains: args.search, mode: 'insensitive' } },
+        ];
+      }
+
+      if (args.tagSlug) {
+        where.tags = {
+          some: {
+            tag: { slug: args.tagSlug },
+          },
+        };
+      }
+
+      if (cursor) {
+        where.id = { gt: cursor };
+      }
+
+      const [items, count] = await Promise.all([
+        prisma.product.findMany({
+          where,
+          include: {
+            images: { where: { productId: { not: null } }, take: 1, orderBy: { position: 'asc' } },
+            tags: { include: { tag: true } },
+          },
+          take: first + 1,
+          skip: 0,
+          orderBy: { id: 'asc' },
+        }),
+        prisma.product.count({ where }),
+      ]);
+
+      const hasNextPage = items.length > first;
+      const edges = items.slice(0, first).map((item) => ({
+        node: item,
+        cursor: encodeCursor(item.id),
+      }));
+
+      return {
+        edges,
+        pageInfo: {
+          hasNextPage,
+          hasPreviousPage: !!args.after,
+          startCursor: edges[0]?.cursor ?? null,
+          endCursor: edges[edges.length - 1]?.cursor ?? null,
+        },
+        totalCount: count,
+      };
     },
   })
 );

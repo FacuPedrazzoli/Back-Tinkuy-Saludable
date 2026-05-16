@@ -1,166 +1,106 @@
-import { AppError } from "./errors";
+import { z } from 'zod'
 
-interface RateLimitConfig {
-  windowMs: number;
-  maxRequests: number;
-}
+const rateLimitConfigSchema = z.object({
+  windowMs: z.coerce.number().default(900000),
+  maxRequests: z.coerce.number().default(100),
+})
 
-interface CartConfig {
-  ttlSeconds: number;
-  lockTtlSeconds: number;
-  lockRetryCount: number;
-  lockRetryDelayMs: number;
-}
+const configSchema = z.object({
+  // Node
+  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+  PORT: z.string().default('4000'),
+  TRUST_PROXY: z.string().optional(),
 
-interface MercadoPagoConfig {
-  accessToken: string;
-  webhookSecret: string;
-  mode: "test" | "production";
-}
+  // Database
+  DATABASE_URL: z.string().url(),
 
-interface RedisConfig {
-  url: string;
-}
+  // Redis
+  REDIS_URL: z.string().url().default('redis://localhost:6379'),
+  REDIS_PASSWORD: z.string().optional(),
 
-interface CacheConfig {
-  stockTtlSeconds: number;
-}
+  // JWT
+  JWT_ADMIN_SECRET: z.string().min(32),
+  JWT_CUSTOMER_SECRET: z.string().min(32),
 
-interface WebhookConfig {
-  timeoutMs: number;
-}
+  // MercadoPago
+  MP_ACCESS_TOKEN: z.string().optional(),
+  MP_PUBLIC_KEY: z.string().optional(),
+  MP_WEBHOOK_SECRET: z.string().optional(),
 
-interface SentryConfig {
-  dsn: string;
-}
+  // Frontend
+  FRONTEND_URL: z.string().url().default('http://localhost:3000'),
 
-interface AppConfig {
-  env: string;
-  version: string;
-}
+  // Email
+  RESEND_API_KEY: z.string().optional(),
+  EMAIL_FROM: z.string().email().default('noreply@tinkuy.com'),
 
-interface Config {
-  rateLimit: {
-    general: RateLimitConfig;
-    auth: RateLimitConfig;
-    register: RateLimitConfig;
-    checkout: RateLimitConfig;
-    fallbackMemoryLimit: number;
-  };
-  cart: CartConfig;
-  mercadoPago: MercadoPagoConfig;
-  redis: RedisConfig;
-  cache: CacheConfig;
-  webhook: WebhookConfig;
-  sentry: SentryConfig;
-  app: AppConfig;
-}
+  // Sentry
+  SENTRY_DSN: z.string().optional(),
+  SENTRY_AUTH_TOKEN: z.string().optional(),
 
-function parseIntOrDefault(value: string | undefined, defaultValue: number, required = false): number {
-  if (value === undefined) {
-    if (required) {
-      throw new AppError("CONFIG_ERROR", `Missing required environment variable`, 500);
-    }
-    return defaultValue;
-  }
-  const parsed = parseInt(value, 10);
-  if (isNaN(parsed)) {
-    if (required) {
-      throw new AppError("CONFIG_ERROR", `Invalid integer value for environment variable`, 500);
-    }
-    return defaultValue;
-  }
-  return parsed;
-}
+  // Logging
+  LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 
-function getEnv(key: string, defaultValue?: string): string {
-  const value = process.env[key];
-  if (value === undefined && defaultValue === undefined) {
-    throw new AppError("CONFIG_ERROR", `Missing required environment variable: ${key}`, 500);
-  }
-  return value ?? defaultValue!;
-}
+  // Rate limiting
+  RATE_LIMIT_GENERAL_WINDOW_MS: z.coerce.number().default(900000),
+  RATE_LIMIT_GENERAL_MAX_REQUESTS: z.coerce.number().default(100),
+  RATE_LIMIT_AUTH_WINDOW_MS: z.coerce.number().default(900000),
+  RATE_LIMIT_AUTH_MAX_REQUESTS: z.coerce.number().default(5),
+  RATE_LIMIT_REGISTER_WINDOW_MS: z.coerce.number().default(3600000),
+  RATE_LIMIT_REGISTER_MAX_REQUESTS: z.coerce.number().default(3),
+  RATE_LIMIT_CHECKOUT_WINDOW_MS: z.coerce.number().default(60000),
+  RATE_LIMIT_CHECKOUT_MAX_REQUESTS: z.coerce.number().default(10),
+  RATE_LIMIT_FALLBACK_MEMORY_LIMIT: z.coerce.number().default(1000),
+})
 
-function getRequiredEnv(key: string): string {
-  const value = process.env[key];
-  if (value === undefined || value.trim() === "") {
-    throw new AppError("CONFIG_ERROR", `Missing required environment variable: ${key}`, 500);
-  }
-  return value;
-}
-
-export const config: Config = {
-  rateLimit: {
+// Helper para construir el objeto rateLimit que espera rate-limit.ts
+function buildRateLimitConfig(): {
+  general: { windowMs: number; maxRequests: number }
+  auth: { windowMs: number; maxRequests: number }
+  register: { windowMs: number; maxRequests: number }
+  checkout: { windowMs: number; maxRequests: number }
+  fallbackMemoryLimit: number
+} {
+  return {
     general: {
-      windowMs: parseIntOrDefault(process.env.RATE_LIMIT_GENERAL_WINDOW_MS, 60 * 1000),
-      maxRequests: parseIntOrDefault(process.env.RATE_LIMIT_GENERAL_MAX_REQUESTS, 100),
+      windowMs: Number(process.env.RATE_LIMIT_GENERAL_WINDOW_MS || 900000),
+      maxRequests: Number(process.env.RATE_LIMIT_GENERAL_MAX_REQUESTS || 100),
     },
     auth: {
-      windowMs: parseIntOrDefault(process.env.RATE_LIMIT_AUTH_WINDOW_MS, 15 * 60 * 1000),
-      maxRequests: parseIntOrDefault(process.env.RATE_LIMIT_AUTH_MAX_REQUESTS, 5),
+      windowMs: Number(process.env.RATE_LIMIT_AUTH_WINDOW_MS || 900000),
+      maxRequests: Number(process.env.RATE_LIMIT_AUTH_MAX_REQUESTS || 5),
     },
     register: {
-      windowMs: parseIntOrDefault(process.env.RATE_LIMIT_REGISTER_WINDOW_MS, 60 * 60 * 1000),
-      maxRequests: parseIntOrDefault(process.env.RATE_LIMIT_REGISTER_MAX_REQUESTS, 3),
+      windowMs: Number(process.env.RATE_LIMIT_REGISTER_WINDOW_MS || 3600000),
+      maxRequests: Number(process.env.RATE_LIMIT_REGISTER_MAX_REQUESTS || 3),
     },
     checkout: {
-      windowMs: parseIntOrDefault(process.env.RATE_LIMIT_CHECKOUT_WINDOW_MS, 60 * 1000),
-      maxRequests: parseIntOrDefault(process.env.RATE_LIMIT_CHECKOUT_MAX_REQUESTS, 10),
+      windowMs: Number(process.env.RATE_LIMIT_CHECKOUT_WINDOW_MS || 60000),
+      maxRequests: Number(process.env.RATE_LIMIT_CHECKOUT_MAX_REQUESTS || 10),
     },
-    fallbackMemoryLimit: parseIntOrDefault(process.env.RATE_LIMIT_FALLBACK_MEMORY_LIMIT, 500),
-  },
-  cart: {
-    ttlSeconds: parseIntOrDefault(process.env.CART_TTL_SECONDS, 24 * 60 * 60),
-    lockTtlSeconds: parseIntOrDefault(process.env.CART_LOCK_TTL_SECONDS, 5),
-    lockRetryCount: parseIntOrDefault(process.env.CART_LOCK_RETRY_COUNT, 3),
-    lockRetryDelayMs: parseIntOrDefault(process.env.CART_LOCK_RETRY_DELAY_MS, 100),
-  },
-  mercadoPago: {
-    accessToken: getEnv("MP_ACCESS_TOKEN", ""),
-    webhookSecret: getRequiredEnv("MP_WEBHOOK_SECRET"),
-    mode: (process.env.MP_MODE as "test" | "production") ?? "test",
-  },
-  redis: {
-    url: getRequiredEnv("REDIS_URL"),
-  },
-  cache: {
-    stockTtlSeconds: parseIntOrDefault(process.env.STOCK_TTL_SECONDS, 300),
-  },
-  webhook: {
-    timeoutMs: parseIntOrDefault(process.env.WEBHOOK_TIMEOUT_MS, 30000),
-  },
-  sentry: {
-    dsn: getEnv("SENTRY_DSN", ""),
-  },
-  app: {
-    env: process.env.NODE_ENV ?? "development",
-    version: process.env.APP_VERSION ?? "1.0.0",
-  },
-};
-
-export function validateConfig(): void {
-  const errors: string[] = [];
-
-  if (!process.env.DATABASE_URL) {
-    errors.push("DATABASE_URL is required");
-  }
-
-  if (!config.mercadoPago.accessToken) {
-    errors.push("MP_ACCESS_TOKEN is required");
-  }
-
-  if (process.env.NODE_ENV === "production") {
-    if (!process.env.FRONTEND_URL) {
-      errors.push("FRONTEND_URL is required in production");
-    }
-    if (config.redis.url === "redis://localhost:6379") {
-      errors.push("REDIS_URL must be a production Redis instance, not localhost");
-    }
-  }
-
-  if (errors.length > 0) {
-    throw new AppError("BOOTSTRAP_ERROR", errors.join("; "), 500);
+    fallbackMemoryLimit: Number(process.env.RATE_LIMIT_FALLBACK_MEMORY_LIMIT || 1000),
   }
 }
 
-export type { Config, RateLimitConfig, CartConfig, MercadoPagoConfig, RedisConfig, CacheConfig, WebhookConfig, SentryConfig, AppConfig };
+export function validateConfig(): void {
+  const result = configSchema.safeParse(process.env)
+
+  if (!result.success) {
+    const errors = result.error.errors.map(
+      (e) => `  - ${e.path.join('.')}: ${e.message}`
+    )
+    throw new Error(
+      `❌ Invalid environment configuration:\n${errors.join('\n')}\n\n` +
+      `Please fix your .env file and restart the server.`
+    )
+  }
+}
+
+const baseConfig = configSchema.parse(process.env)
+
+export const config = {
+  ...baseConfig,
+  rateLimit: buildRateLimitConfig(),
+}
+
+export type Config = z.infer<typeof configSchema>

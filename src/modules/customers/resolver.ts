@@ -2,6 +2,7 @@ import { builder } from "@graphql/builder";
 import { prisma } from "@lib/prisma";
 import * as customerService from "./service";
 import { AuthenticationError, ForbiddenError } from "@lib/errors";
+import { encodeCursor, decodeCursor, PageInfo } from "@graphql/types/connection";
 
 export const Customer = builder.prismaObject("Customer", {
   fields: (t) => ({
@@ -52,6 +53,34 @@ const AdminCustomer = builder.objectRef<{
     totalOrders: t.exposeInt("totalOrders"),
     totalSpent: t.exposeFloat("totalSpent"),
     createdAt: t.expose("createdAt", { type: "DateTime" }),
+  }),
+});
+
+const CustomerEdge = builder.objectRef<{ node: unknown; cursor: string }>("CustomerEdge").implement({
+  fields: (t) => ({
+    node: t.field({
+      type: AdminCustomer,
+      resolve: (parent) => parent.node as any,
+    }),
+    cursor: t.exposeString("cursor"),
+  }),
+});
+
+const CustomerConnection = builder.objectRef<{
+  edges: { node: unknown; cursor: string }[];
+  pageInfo: { hasNextPage: boolean; hasPreviousPage: boolean; startCursor: string | null; endCursor: string | null };
+  totalCount: number;
+}>("CustomerConnection").implement({
+  fields: (t) => ({
+    edges: t.field({
+      type: [CustomerEdge],
+      resolve: (parent) => parent.edges,
+    }),
+    pageInfo: t.field({
+      type: PageInfo,
+      resolve: (parent) => parent.pageInfo,
+    }),
+    totalCount: t.exposeInt("totalCount"),
   }),
 });
 
@@ -117,13 +146,18 @@ builder.queryField("meCustomer", (t) =>
 
 builder.queryField("customers", (t) =>
   t.field({
-    type: [AdminCustomer],
+    type: CustomerConnection,
     args: {
       search: t.arg.string(),
+      first: t.arg.int(),
+      after: t.arg.string(),
     },
     authScopes: { manager: true },
     resolve: async (_parent, args, ctx) => {
       if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+
+      const first = args.first ?? 20;
+      const cursor = args.after ? decodeCursor(args.after) : undefined;
 
       const where: any = { tenantId: ctx.tenantId };
 
@@ -135,34 +169,61 @@ builder.queryField("customers", (t) =>
         ];
       }
 
-      const customers = await prisma.customer.findMany({
-        where,
-        orderBy: { createdAt: "desc" },
-      });
+      if (cursor) {
+        where.id = { gt: cursor };
+      }
 
-      const customersWithStats = await Promise.all(
-        customers.map(async (customer) => {
+      const [customers, count] = await Promise.all([
+        prisma.customer.findMany({
+          where,
+          take: first + 1,
+          skip: 0,
+          orderBy: { id: 'asc' },
+        }),
+        prisma.customer.count({ where }),
+      ]);
+
+      const hasNextPage = customers.length > first;
+      const customerEdges = customers.slice(0, first).map((customer) => ({
+        node: customer,
+        cursor: encodeCursor(customer.id),
+      }));
+
+      const nodesWithStats = await Promise.all(
+        customerEdges.map(async (edge) => {
           const [orderCount, orderAgg] = await Promise.all([
-            prisma.order.count({ where: { customerId: customer.id } }),
+            prisma.order.count({ where: { customerId: (edge.node as any).id } }),
             prisma.order.aggregate({
-              where: { customerId: customer.id, paymentStatus: "approved" },
+              where: { customerId: (edge.node as any).id, paymentStatus: "approved" },
               _sum: { totalAmount: true },
             }),
           ]);
           return {
-            id: customer.id,
-            email: customer.email,
-            firstName: customer.firstName,
-            lastName: customer.lastName,
-            phone: customer.phone,
-            totalOrders: orderCount,
-            totalSpent: Number(orderAgg._sum.totalAmount ?? 0),
-            createdAt: customer.createdAt,
+            node: {
+              id: (edge.node as any).id,
+              email: (edge.node as any).email,
+              firstName: (edge.node as any).firstName,
+              lastName: (edge.node as any).lastName,
+              phone: (edge.node as any).phone,
+              totalOrders: orderCount,
+              totalSpent: Number(orderAgg._sum.totalAmount ?? 0),
+              createdAt: (edge.node as any).createdAt,
+            },
+            cursor: edge.cursor,
           };
         })
       );
 
-      return customersWithStats;
+      return {
+        edges: nodesWithStats,
+        pageInfo: {
+          hasNextPage,
+          hasPreviousPage: !!args.after,
+          startCursor: nodesWithStats[0]?.cursor ?? null,
+          endCursor: nodesWithStats[nodesWithStats.length - 1]?.cursor ?? null,
+        },
+        totalCount: count,
+      };
     },
   })
 );

@@ -42,11 +42,11 @@ export interface CustomerTokenPayload {
 export type TokenPayload = AdminTokenPayload | CustomerTokenPayload;
 
 export function signAdminToken(payload: AdminTokenPayload): string {
-  return jwt.sign(payload, validatedAdminSecret, { expiresIn: "24h" });
+  return jwt.sign(payload, validatedAdminSecret, { expiresIn: "4h" });
 }
 
 export function signCustomerToken(payload: CustomerTokenPayload): string {
-  return jwt.sign(payload, validatedCustomerSecret, { expiresIn: "7d" });
+  return jwt.sign(payload, validatedCustomerSecret, { expiresIn: "24h" });
 }
 
 export async function revokeToken(token: string): Promise<void> {

@@ -3,6 +3,8 @@ import * as orderService from "./service";
 import { ForbiddenError, AuthenticationError, ValidationError } from "@lib/errors";
 import { rateLimitGeneral } from "@lib/rate-limit";
 import { emailSchema } from "@lib/validation";
+import { encodeCursor, decodeCursor, PageInfo } from "@graphql/types/connection";
+import { prisma } from "@lib/prisma";
 
 export const Order = builder.prismaObject("Order", {
   fields: (t) => ({
@@ -43,56 +45,137 @@ const UpdateOrderStatusInput = builder.inputType("UpdateOrderStatusInput", {
   }),
 });
 
-interface OrderListShape {
-  items: Awaited<ReturnType<typeof orderService.listOrders>>["items"];
-  count: number;
-}
+const OrderEdge = builder.objectRef<{ node: unknown; cursor: string }>("OrderEdge").implement({
+  fields: (t) => ({
+    node: t.field({
+      type: Order,
+      resolve: (parent) => parent.node as any,
+    }),
+    cursor: t.exposeString("cursor"),
+  }),
+});
 
-const OrderList = builder.objectRef<OrderListShape>("OrderList").implement({
-  fields: (t2) => ({
-    items: t2.field({ type: [Order], resolve: (parent) => parent.items }),
-    count: t2.exposeInt("count"),
+const OrderConnection = builder.objectRef<{
+  edges: { node: unknown; cursor: string }[];
+  pageInfo: { hasNextPage: boolean; hasPreviousPage: boolean; startCursor: string | null; endCursor: string | null };
+  totalCount: number;
+}>("OrderConnection").implement({
+  fields: (t) => ({
+    edges: t.field({
+      type: [OrderEdge],
+      resolve: (parent) => parent.edges,
+    }),
+    pageInfo: t.field({
+      type: PageInfo,
+      resolve: (parent) => parent.pageInfo,
+    }),
+    totalCount: t.exposeInt("totalCount"),
   }),
 });
 
 builder.queryField("orders", (t) =>
   t.field({
-    type: OrderList,
+    type: OrderConnection,
     args: {
       status: t.arg.string(),
-      take: t.arg.int({ defaultValue: 20 }),
-      skip: t.arg.int({ defaultValue: 0 }),
+      first: t.arg.int(),
+      after: t.arg.string(),
     },
     authScopes: { manager: true },
     resolve: async (_parent, args, ctx) => {
       if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
-      return orderService.listOrders({
-        tenantId: ctx.tenantId,
-        status: (args.status ?? undefined) as "pending" | "confirmed" | "cancelled" | "refunded" | undefined,
-        take: args.take ?? 20,
-        skip: args.skip ?? 0,
-      });
+
+      const first = args.first ?? 20;
+      const cursor = args.after ? decodeCursor(args.after) : undefined;
+
+      const where: Record<string, unknown> = { tenantId: ctx.tenantId };
+      if (args.status) where.status = args.status;
+      if (cursor) where.id = { gt: cursor };
+
+      const [items, count] = await Promise.all([
+        prisma.order.findMany({
+          where,
+          take: first + 1,
+          skip: 0,
+          orderBy: { id: 'asc' },
+          include: {
+            items: { include: { product: true, variant: true } },
+            customer: true,
+            branch: true,
+          },
+        }),
+        prisma.order.count({ where }),
+      ]);
+
+      const hasNextPage = items.length > first;
+      const edges = items.slice(0, first).map((item) => ({
+        node: item,
+        cursor: encodeCursor(item.id),
+      }));
+
+      return {
+        edges,
+        pageInfo: {
+          hasNextPage,
+          hasPreviousPage: !!args.after,
+          startCursor: edges[0]?.cursor ?? null,
+          endCursor: edges[edges.length - 1]?.cursor ?? null,
+        },
+        totalCount: count,
+      };
     },
   })
 );
 
 builder.queryField("myOrders", (t) =>
   t.field({
-    type: OrderList,
+    type: OrderConnection,
     args: {
-      take: t.arg.int({ defaultValue: 20 }),
-      skip: t.arg.int({ defaultValue: 0 }),
+      first: t.arg.int(),
+      after: t.arg.string(),
     },
     authScopes: { customer: true },
     resolve: async (_parent, args, ctx) => {
       if (!ctx.user) throw new AuthenticationError("Unauthorized");
       if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
-      return orderService.listOrders({
-        tenantId: ctx.tenantId,
-        customerId: ctx.user.id,
-        take: args.take ?? 20,
-        skip: args.skip ?? 0,
-      });
+
+      const first = args.first ?? 20;
+      const cursor = args.after ? decodeCursor(args.after) : undefined;
+
+      const where: Record<string, unknown> = { tenantId: ctx.tenantId, customerId: ctx.user.id };
+      if (cursor) where.id = { gt: cursor };
+
+      const [items, count] = await Promise.all([
+        prisma.order.findMany({
+          where,
+          take: first + 1,
+          skip: 0,
+          orderBy: { id: 'asc' },
+          include: {
+            items: { include: { product: true, variant: true } },
+            customer: true,
+            branch: true,
+          },
+        }),
+        prisma.order.count({ where }),
+      ]);
+
+      const hasNextPage = items.length > first;
+      const edges = items.slice(0, first).map((item) => ({
+        node: item,
+        cursor: encodeCursor(item.id),
+      }));
+
+      return {
+        edges,
+        pageInfo: {
+          hasNextPage,
+          hasPreviousPage: !!args.after,
+          startCursor: edges[0]?.cursor ?? null,
+          endCursor: edges[edges.length - 1]?.cursor ?? null,
+        },
+        totalCount: count,
+      };
     },
   })
 );

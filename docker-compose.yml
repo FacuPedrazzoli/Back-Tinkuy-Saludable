@@ -3,26 +3,24 @@ version: '3.8'
 services:
   postgres:
     image: postgres:15-alpine
-    container_name: facusito-postgres
+    container_name: tinkuy-postgres
     environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: pass
-      POSTGRES_DB: facusito
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${POSTGRES_USER:-tinkuy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-tinkuy}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user -d facusito"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tinkuy} -d ${POSTGRES_DB:-tinkuy}"]
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
-    container_name: facusito-redis
-    ports:
-      - "6379:6379"
+    container_name: tinkuy-redis
+    command: redis-server --appendonly yes
     volumes:
       - redis_data:/data
     healthcheck:
@@ -30,56 +28,55 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   app:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: facusito-app
+    container_name: tinkuy-backend
     environment:
-      DATABASE_URL: postgresql://user:pass@postgres:5432/facusito?schema=public
-      REDIS_URL: redis://redis:6379
-      NODE_ENV: development
-      PORT: 4000
+      NODE_ENV: production
+      PORT: ${PORT:-4000}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://tinkuy:changeme@postgres:5432/tinkuy?schema=public}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      MP_ACCESS_TOKEN: ${MP_ACCESS_TOKEN}
+      MP_PUBLIC_KEY: ${MP_PUBLIC_KEY}
+      MP_WEBHOOK_SECRET: ${MP_WEBHOOK_SECRET}
+      MP_NOTIFICATION_URL: ${MP_NOTIFICATION_URL}
+      RESEND_API_KEY: ${RESEND_API_KEY}
+      EMAIL_FROM: ${EMAIL_FROM:-hola@tinkuy.com.ar}
+      EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-Tinkuy}
+      FRONTEND_URL: ${FRONTEND_URL}
+      CORS_ORIGIN: ${CORS_ORIGIN}
+      SENTRY_DSN: ${SENTRY_DSN}
+      RATE_LIMIT_AUTH_WINDOW_MS: ${RATE_LIMIT_AUTH_WINDOW_MS:-900000}
+      RATE_LIMIT_AUTH_MAX_REQUESTS: ${RATE_LIMIT_AUTH_MAX_REQUESTS:-5}
+      RATE_LIMIT_REGISTER_WINDOW_MS: ${RATE_LIMIT_REGISTER_WINDOW_MS:-3600000}
+      RATE_LIMIT_REGISTER_MAX_REQUESTS: ${RATE_LIMIT_REGISTER_MAX_REQUESTS:-3}
+      RATE_LIMIT_CHECKOUT_WINDOW_MS: ${RATE_LIMIT_CHECKOUT_WINDOW_MS:-60000}
+      RATE_LIMIT_CHECKOUT_MAX_REQUESTS: ${RATE_LIMIT_CHECKOUT_MAX_REQUESTS:-10}
+      REDIS_CACHE_TTL: ${REDIS_CACHE_TTL:-300}
+      CART_TTL: ${CART_TTL:-86400}
+      TOKEN_BLACKLIST_TTL: ${TOKEN_BLACKLIST_TTL:-86400}
+      ORDER_CACHE_TTL: ${ORDER_CACHE_TTL:-60}
     ports:
-      - "4000:4000"
+      - "${PORT:-4000}:4000"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    volumes:
-      - ./src:/app/src:ro
-      - ./prisma:/app/prisma:ro
-    command: npm run dev
-
-  frontend:
-    build:
-      context: .
-      dockerfile: Dockerfile.frontend
-    container_name: facusito-frontend
-    ports:
-      - "3000:3000"
-    depends_on:
-      - app
-    volumes:
-      - ./tinkuy:/app:t
-      - /app/node_modules
-      - /app/.next
-    command: npm run dev
-
-  nginx:
-    image: nginx:alpine
-    container_name: facusito-nginx
-    ports:
-      - "80:80"
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-    depends_on:
-      - frontend
-      - app
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:4000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
 
 volumes:
   postgres_data:

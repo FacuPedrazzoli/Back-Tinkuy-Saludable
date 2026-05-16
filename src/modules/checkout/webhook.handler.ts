@@ -42,18 +42,15 @@ async function processWebhookWithTimeout(req: Request, res: Response): Promise<R
   const webhookSecret = process.env.MP_WEBHOOK_SECRET;
 
   if (!webhookSecret || !signature) {
-    if (process.env.NODE_ENV === "production") {
-      console.error("Webhook verification failed: missing secret or signature");
-      return res.status(401).json({ error: "Missing webhook credentials" });
-    }
-    console.warn("Webhook signature not verified in development mode");
-  } else {
-    const rawPayload = Buffer.isBuffer(req.body) ? req.body.toString() : JSON.stringify(req.body);
-    const isValid = verifyMercadoPagoSignature(rawPayload, signature, webhookSecret);
-    if (!isValid) {
-      console.error("Invalid webhook signature");
-      return res.status(401).json({ error: "Invalid webhook signature" });
-    }
+    logger.error({ webhookSecret: !!webhookSecret, signature: !!signature }, 'Webhook verification failed: missing secret or signature');
+    return res.status(401).json({ error: "Missing webhook credentials" });
+  }
+
+  const rawPayload = Buffer.isBuffer(req.body) ? req.body.toString() : JSON.stringify(req.body);
+  const isValid = verifyMercadoPagoSignature(rawPayload, signature, webhookSecret);
+  if (!isValid) {
+    logger.error('Invalid webhook signature');
+    return res.status(401).json({ error: "Invalid webhook signature" });
   }
 
   const payload = Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString()) : req.body;
@@ -132,6 +129,10 @@ async function processWebhookWithTimeout(req: Request, res: Response): Promise<R
         await processApprovedPayment(payload, mpPayment);
       } else if (status === "rejected" || status === "cancelled") {
         await processRejectedOrCancelledPayment(payload, mpPayment);
+      } else if (status === "pending") {
+        await processPendingPayment(payload, mpPayment);
+      } else if (status === "refunded") {
+        await processRefundedPayment(payload, mpPayment);
       }
     }
   } catch (err) {
@@ -260,6 +261,54 @@ async function processApprovedPayment(payload: any, mpPayment: any) {
 
   await clearCart(cartId, tenantId, isUserCart);
   await clearValidatedCartSnapshot(preferenceId, tenantId);
+}
+
+async function processPendingPayment(payload: any, mpPayment: any) {
+  const paymentId = String(payload.data?.id);
+  const preferenceId = payload.data?.preference_id;
+  
+  logger.info({ paymentId, preferenceId }, 'Processing pending payment');
+  
+  await prisma.webhookEvent.updateMany({
+    where: { eventId: paymentId, source: 'mercadopago' },
+    data: { processed: true },
+  });
+  
+  return;
+}
+
+async function processRefundedPayment(payload: any, mpPayment: any) {
+  const paymentId = String(payload.data?.id);
+  const orderId = mpPayment.external_reference?.split(':')[1];
+  
+  logger.info({ paymentId, orderId }, 'Processing refunded payment');
+  
+  if (!orderId) {
+    logger.warn({ paymentId }, 'No orderId found in refunded payment');
+    return;
+  }
+  
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: { customer: true },
+    });
+    
+    if (!order) {
+      logger.warn({ orderId }, 'Order not found for refund');
+      return;
+    }
+    
+    await prisma.order.update({
+      where: { id: orderId },
+      data: { status: 'REFUNDED' },
+    });
+    
+    logger.info({ orderId }, 'Order marked as refunded');
+  } catch (error) {
+    logger.error({ error, orderId }, 'Error processing refund');
+    throw error;
+  }
 }
 
 async function processRejectedOrCancelledPayment(payload: any, mpPayment: any) {

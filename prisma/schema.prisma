@@ -154,6 +154,7 @@ model Customer {
   addresses      CustomerAddress[]
   orders         Order[]
   reviews        Review[]
+  wishlists      Wishlist[]
   loyaltyPointsRecords LoyaltyPoint[]
   couponUses     CouponUse[]
   abandonedCarts AbandonedCart[]
@@ -244,6 +245,7 @@ model Product {
   stockMovements StockMovement[]
   orderItems   OrderItem[]
   reviews      Review[]
+  wishlists    Wishlist[]
 
   @@unique([tenantId, slug])
   @@unique([tenantId, sku])
@@ -277,6 +279,7 @@ model ProductVariant {
   images      ProductImage[]
   stockMovements StockMovement[]
   orderItems  OrderItem[]
+  wishlists   Wishlist[]
 
   @@unique([productId, sku])
   @@index([productId])
@@ -443,6 +446,7 @@ model Order {
   items      OrderItem[]
   couponUses CouponUse[]
   loyaltyPointsRecords LoyaltyPoint[]
+  invoices   Invoice[]
 
   @@index([tenantId, createdAt])
   @@index([tenantId, customerId])
@@ -671,4 +675,72 @@ model WebhookEvent {
 
   @@unique([source, eventId])
   @@index([source, eventId])
+}
+
+// ───────────────────────────────────────────
+// Invoices
+// ───────────────────────────────────────────
+
+enum InvoiceType {
+  A
+  B
+  C
+  MIXTA
+}
+
+model Invoice {
+  id            String      @id @default(cuid())
+  orderId       String
+  order         Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  number        String      @unique
+  type          InvoiceType
+  pdfUrl        String?
+  issuedAt      DateTime    @default(now())
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@index([orderId])
+  @@index([number])
+}
+
+// ───────────────────────────────────────────
+// Audit Log
+// ───────────────────────────────────────────
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  tenantId   String
+  userId     String?
+  userEmail  String?
+  action     String
+  entityType String
+  entityId   String?
+  oldData    Json?
+  newData    Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([userId])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}
+
+// ───────────────────────────────────────────
+// Wishlist
+// ───────────────────────────────────────────
+
+model Wishlist {
+  id         String   @id @default(cuid())
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  productId  String
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variantId  String?
+  createdAt  DateTime @default(now())
+
+  @@unique([customerId, productId, variantId])
+  @@index([customerId])
+  @@index([productId])
 }
