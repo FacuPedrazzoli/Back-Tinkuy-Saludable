@@ -43,7 +43,7 @@ export const builder = new SchemaBuilder<{
     filterConnectionTotalCount: true,
   },
   authScopes: async (context) => ({
-    public: false,
+    public: true,
     authenticated: !!context.user,
     admin: context.user?.role === "admin",
     manager: context.user?.role === "admin" || context.user?.role === "manager",

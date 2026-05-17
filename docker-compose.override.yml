@@ -1,0 +1,22 @@
+# =============================================================================
+# docker-compose.override.yml — LOCAL DEV ONLY
+# =============================================================================
+# This file is loaded automatically by `docker compose` when running locally.
+# It is NOT used by Dokploy (Dokploy only reads docker-compose.yml).
+#
+# Purpose: publish host ports so developers can reach services directly.
+# =============================================================================
+
+services:
+
+  postgres:
+    ports:
+      - "5432:5432"
+
+  redis:
+    ports:
+      - "6379:6379"
+
+  backend:
+    ports:
+      - "4000:4000"

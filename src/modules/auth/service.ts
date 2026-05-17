@@ -7,6 +7,7 @@ import {
   ValidationError,
 } from "@lib/errors";
 import { signAdminToken, signCustomerToken } from "@lib/jwt";
+import { resolveTenantId } from "@lib/tenant-resolve";
 import type { AdminTokenPayload, CustomerTokenPayload } from "@lib/jwt";
 import { passwordSchema } from "@lib/validation";
 import { logger } from "@lib/logger";
@@ -24,8 +25,9 @@ export async function adminLogin(input: {
   password: string;
   tenantId: string;
 }) {
+  const tenantId = await resolveTenantId(input.tenantId);
   const admin = await prisma.adminUser.findUnique({
-    where: { tenantId_email: { tenantId: input.tenantId, email: input.email } },
+    where: { tenantId_email: { tenantId, email: input.email } },
   });
 
   if (!admin || !admin.isActive) {
@@ -107,9 +109,10 @@ export async function customerRegister(input: {
     throw new ValidationError(passwordValidation.error.errors[0].message);
   }
 
+  const tenantId = await resolveTenantId(input.tenantId);
   const existing = await prisma.customer.findUnique({
     where: {
-      tenantId_email: { tenantId: input.tenantId, email: input.email },
+      tenantId_email: { tenantId, email: input.email },
     },
   });
   if (existing) {
@@ -119,7 +122,7 @@ export async function customerRegister(input: {
   const hashed = await hash(input.password, SALT_ROUNDS);
   const customer = await prisma.customer.create({
     data: {
-      tenantId: input.tenantId,
+      tenantId,
       email: input.email,
       password: hashed,
       firstName: input.firstName,
@@ -154,9 +157,10 @@ export async function customerLogin(input: {
   password: string;
   tenantId: string;
 }) {
+  const tenantId = await resolveTenantId(input.tenantId);
   const customer = await prisma.customer.findUnique({
     where: {
-      tenantId_email: { tenantId: input.tenantId, email: input.email },
+      tenantId_email: { tenantId, email: input.email },
     },
   });
 

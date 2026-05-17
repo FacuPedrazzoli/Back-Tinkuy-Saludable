@@ -56,15 +56,14 @@ COPY --from=builder /app/package.json ./package.json
 # Copy email templates
 COPY --from=builder /app/src/emails ./src/emails
 
+# Install dumb-init for proper signal handling (must run as root, before USER)
+RUN apk add --no-cache dumb-init
+
 # Use non-root user
 USER api
 
 # Expose port
 EXPOSE 4000
-
-# Graceful shutdown handling
-# Using dumb-init for proper signal handling
-RUN apk add --no-cache dumb-init
 
 # Healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --start-period=45s --retries=3 \

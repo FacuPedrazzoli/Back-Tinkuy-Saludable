@@ -1,48 +1,63 @@
 import { PrismaClient } from "@prisma/client";
 import { getTenantId } from "./tenant-context";
 
+// Only models that actually have a `tenantId` scalar column belong here.
+// Child/relation models (ProductImage, ProductVariant, OrderItem, the join
+// tables, CustomerAddress, ...) are scoped transitively through their parent
+// and have NO tenantId column — injecting a tenantId filter on them throws
+// a Prisma "Unknown argument `tenantId`" validation error.
 const TENANT_MODELS = [
   // Note: "Tenant" is intentionally excluded — it has no tenantId field
   "Branch",
   "AdminUser",
   "Customer",
-  "CustomerAddress",
   "Product",
-  "ProductVariant",
-  "ProductAttribute",
-  "ProductImage",
   "Tag",
-  "ProductTag",
   "Supplier",
-  "ProductSupplier",
   "StockMovement",
   "Order",
-  "OrderItem",
 ];
 
 function isTenantModel(model: string): boolean {
   return TENANT_MODELS.includes(model);
 }
 
-function injectTenantFilter(args: unknown, tenantId: string): unknown {
-  if (!args || typeof args !== "object") return args;
+// Actions whose top-level `where` selects the rows the operation acts on.
+// `create`/`createMany` have no `where`; their resolvers set tenantId in
+// `data` explicitly, so the middleware must NOT touch them.
+const WHERE_SCOPED_ACTIONS = new Set([
+  "findUnique",
+  "findUniqueOrThrow",
+  "findFirst",
+  "findFirstOrThrow",
+  "findMany",
+  "count",
+  "aggregate",
+  "groupBy",
+  "update",
+  "updateMany",
+  "delete",
+  "deleteMany",
+  "upsert",
+]);
 
-  if (Array.isArray(args)) {
-    return args.map((item) => injectTenantFilter(item, tenantId));
-  }
-
-  const result: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(args as Record<string, unknown>)) {
-    if (key === "where" && value && typeof value === "object") {
-      const filtered = injectTenantFilter(value, tenantId) as Record<string, unknown>;
-      result[key] = { ...filtered, tenantId };
-    } else if (typeof value === "object" && value !== null) {
-      result[key] = injectTenantFilter(value, tenantId);
-    } else {
-      result[key] = value;
-    }
-  }
-  return result;
+// Inject the tenant filter ONLY into the top-level `where` of the root model.
+// Nested relation filters inside `include`/`select` must be left untouched:
+// they target different models (often without a tenantId column) and are
+// already constrained transitively through the parent relation.
+function injectTenantFilter(
+  args: unknown,
+  tenantId: string,
+): Record<string, unknown> {
+  const base =
+    args && typeof args === "object" && !Array.isArray(args)
+      ? (args as Record<string, unknown>)
+      : {};
+  const where =
+    base.where && typeof base.where === "object" && !Array.isArray(base.where)
+      ? (base.where as Record<string, unknown>)
+      : {};
+  return { ...base, where: { ...where, tenantId } };
 }
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -75,6 +90,12 @@ prisma.$use(async (params, next) => {
   const tenantId = getTenantId();
   if (!tenantId) {
     // Allow unfiltered queries for super-admin or internal operations
+    return next(params);
+  }
+
+  // create / createMany have no `where`; their resolvers set tenantId in
+  // `data`. Only scope actions that filter rows via a top-level `where`.
+  if (!WHERE_SCOPED_ACTIONS.has(params.action)) {
     return next(params);
   }
 

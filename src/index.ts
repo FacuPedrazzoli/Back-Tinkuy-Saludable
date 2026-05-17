@@ -85,10 +85,12 @@ app.use(timeout('30s'));
 app.use(sentryHandlers.requestHandler());
 app.use(requestLoggingMiddleware);
 
-app.use((req, res) => {
+app.use((req, res, next) => {
   if (req.timedout && !res.headersSent) {
     res.status(408).json({ error: "Request timeout" });
+    return;
   }
+  next();
 });
 
 app.use(sentryHandlers.errorHandler());

@@ -1,16 +1,17 @@
 declare module "graphql-depth-limit" {
-  import { DocumentNode } from "graphql";
+  import { ValidationContext, ASTVisitor } from "graphql";
 
   interface DepthLimitOptions {
     ignoreIntrospection?: boolean;
-    maxDepth?: number;
   }
 
+  type DepthCallback = (depths: Record<string, number>) => void;
+
   function depthLimit(
-    document: DocumentNode,
     maxDepth: number,
-    options?: DepthLimitOptions
-  ): Error[] | undefined;
+    options?: DepthLimitOptions,
+    callback?: DepthCallback
+  ): (context: ValidationContext) => ASTVisitor;
 
   export = depthLimit;
 }

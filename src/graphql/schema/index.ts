@@ -7,7 +7,7 @@ import './queries'
 import './mutations'
 
 // Import connection types
-import './types/connection'
+import '@graphql/types/connection'
 
 // Import module resolvers to register them
 // These modules self-register by importing builder and calling queryField/mutationField

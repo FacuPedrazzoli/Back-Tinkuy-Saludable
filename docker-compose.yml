@@ -1,26 +1,54 @@
-version: '3.8'
+# =============================================================================
+# docker-compose.yml — Back-Tinkuy-Saludable — Canonical Dokploy file
+# =============================================================================
+# Dokploy deploys THIS repo as a standalone app. Traefik (managed by Dokploy)
+# handles SSL and domain routing — no nginx service is needed here.
+#
+# Usage:
+#   Production (Dokploy):  point Dokploy at this file; supply env vars via
+#                          Dokploy's environment UI or a .env file on the host.
+#   Local dev:             `docker compose up` — the override file
+#                          (docker-compose.override.yml) is loaded automatically
+#                          and publishes host ports for direct access.
+#
+# All variables are sourced from ${VAR} — see .env.example for the full list.
+# =============================================================================
 
 services:
+
+  # ---------------------------------------------------------------------------
+  # POSTGRES — Primary database
+  # No host port published; only backend/worker/cron reach it internally.
+  # ---------------------------------------------------------------------------
   postgres:
     image: postgres:15-alpine
-    container_name: tinkuy-postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-tinkuy}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
-      POSTGRES_DB: ${POSTGRES_DB:-tinkuy}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tinkuy} -d ${POSTGRES_DB:-tinkuy}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
-    restart: unless-stopped
+      start_period: 10s
 
+  # ---------------------------------------------------------------------------
+  # REDIS — Cache, sessions, job queues
+  # No host port published; only backend/worker/cron reach it internally.
+  # ---------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
-    container_name: tinkuy-redis
-    command: redis-server --appendonly yes
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 512mb
+      --maxmemory-policy volatile-lru
     volumes:
       - redis_data:/data
     healthcheck:
@@ -28,43 +56,79 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    restart: unless-stopped
+      start_period: 10s
 
-  app:
+  # ---------------------------------------------------------------------------
+  # BACKEND — Apollo Server + Express (GraphQL API, port 4000)
+  # Dokploy/Traefik routes external traffic here.
+  # ---------------------------------------------------------------------------
+  backend:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: tinkuy-backend
+    restart: unless-stopped
+    expose:
+      - "4000"
     environment:
       NODE_ENV: production
-      PORT: ${PORT:-4000}
-      DATABASE_URL: ${DATABASE_URL:-postgresql://tinkuy:changeme@postgres:5432/tinkuy?schema=public}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
-      JWT_SECRET: ${JWT_SECRET}
-      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      PORT: "4000"
+      TRUST_PROXY: "1"
+
+      # --- Database ---
+      # Built from individual POSTGRES_* vars so Dokploy can manage each piece.
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
+
+      # --- Redis ---
+      REDIS_URL: redis://redis:6379
+
+      # --- Auth ---
+      JWT_ADMIN_SECRET: ${JWT_ADMIN_SECRET}
+      JWT_CUSTOMER_SECRET: ${JWT_CUSTOMER_SECRET}
+      COOKIE_SECRET: ${COOKIE_SECRET}
+
+      # --- Admin ---
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+
+      # --- CORS ---
+      # Must be the frontend's PUBLIC domain (e.g. https://tinkuy.com.ar).
+      # Dev: http://localhost:3000
+      FRONTEND_URL: ${FRONTEND_URL}
+
+      # --- MercadoPago ---
       MP_ACCESS_TOKEN: ${MP_ACCESS_TOKEN}
       MP_PUBLIC_KEY: ${MP_PUBLIC_KEY}
       MP_WEBHOOK_SECRET: ${MP_WEBHOOK_SECRET}
       MP_NOTIFICATION_URL: ${MP_NOTIFICATION_URL}
+      MP_MODE: ${MP_MODE:-test}
+
+      # --- Email (Resend) ---
       RESEND_API_KEY: ${RESEND_API_KEY}
       EMAIL_FROM: ${EMAIL_FROM:-hola@tinkuy.com.ar}
       EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-Tinkuy}
-      FRONTEND_URL: ${FRONTEND_URL}
-      CORS_ORIGIN: ${CORS_ORIGIN}
-      SENTRY_DSN: ${SENTRY_DSN}
+
+      # --- File uploads ---
+      UPLOAD_DIR: /app/uploads
+      MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-5}
+
+      # --- Observability ---
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+
+      # --- Rate limiting ---
+      RATE_LIMIT_GENERAL_WINDOW_MS: ${RATE_LIMIT_GENERAL_WINDOW_MS:-60000}
+      RATE_LIMIT_GENERAL_MAX_REQUESTS: ${RATE_LIMIT_GENERAL_MAX_REQUESTS:-100}
       RATE_LIMIT_AUTH_WINDOW_MS: ${RATE_LIMIT_AUTH_WINDOW_MS:-900000}
       RATE_LIMIT_AUTH_MAX_REQUESTS: ${RATE_LIMIT_AUTH_MAX_REQUESTS:-5}
-      RATE_LIMIT_REGISTER_WINDOW_MS: ${RATE_LIMIT_REGISTER_WINDOW_MS:-3600000}
-      RATE_LIMIT_REGISTER_MAX_REQUESTS: ${RATE_LIMIT_REGISTER_MAX_REQUESTS:-3}
       RATE_LIMIT_CHECKOUT_WINDOW_MS: ${RATE_LIMIT_CHECKOUT_WINDOW_MS:-60000}
       RATE_LIMIT_CHECKOUT_MAX_REQUESTS: ${RATE_LIMIT_CHECKOUT_MAX_REQUESTS:-10}
-      REDIS_CACHE_TTL: ${REDIS_CACHE_TTL:-300}
-      CART_TTL: ${CART_TTL:-86400}
-      TOKEN_BLACKLIST_TTL: ${TOKEN_BLACKLIST_TTL:-86400}
-      ORDER_CACHE_TTL: ${ORDER_CACHE_TTL:-60}
-    ports:
-      - "${PORT:-4000}:4000"
+
+      # --- Cache TTLs ---
+      CART_TTL_SECONDS: ${CART_TTL_SECONDS:-86400}
+      STOCK_TTL_SECONDS: ${STOCK_TTL_SECONDS:-300}
+
+    volumes:
+      - uploads:/app/uploads
+      - backend_logs:/app/logs
     depends_on:
       postgres:
         condition: service_healthy
@@ -75,9 +139,81 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s
-    restart: unless-stopped
+      start_period: 45s
+    stop_grace_period: 30s
 
+  # ---------------------------------------------------------------------------
+  # WORKER — Background job processor (emails, webhooks, abandoned carts)
+  # Entrypoint: dist/worker.js  |  port 4001 (internal only)
+  # ---------------------------------------------------------------------------
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      WORKER_MODE: worker
+
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
+      REDIS_URL: redis://redis:6379
+
+      RESEND_API_KEY: ${RESEND_API_KEY}
+      EMAIL_FROM: ${EMAIL_FROM:-hola@tinkuy.com.ar}
+      EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-Tinkuy}
+
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    stop_grace_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # CRON — Scheduled job runner
+  # Entrypoint: dist/cron.js  |  no exposed port
+  # ---------------------------------------------------------------------------
+  cron:
+    build:
+      context: .
+      dockerfile: Dockerfile.cron
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      CRON_MODE: "true"
+
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
+      REDIS_URL: redis://redis:6379
+
+      RESEND_API_KEY: ${RESEND_API_KEY}
+      EMAIL_FROM: ${EMAIL_FROM:-hola@tinkuy.com.ar}
+      EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-Tinkuy}
+
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
 volumes:
   postgres_data:
+    driver: local
   redis_data:
+    driver: local
+  uploads:
+    driver: local
+  backend_logs:
+    driver: local

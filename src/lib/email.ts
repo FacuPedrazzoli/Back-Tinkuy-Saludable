@@ -1,6 +1,18 @@
 import { Resend } from "resend";
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+let resendClient: Resend | null = null;
+
+function getResend(): Resend {
+  if (!process.env.RESEND_API_KEY) {
+    throw new Error(
+      "RESEND_API_KEY is not set — cannot send email in production mode"
+    );
+  }
+  if (!resendClient) {
+    resendClient = new Resend(process.env.RESEND_API_KEY);
+  }
+  return resendClient;
+}
 
 const FROM_EMAIL = process.env.EMAIL_FROM ?? "hola@tinkuy.com.ar";
 const FROM_NAME = process.env.EMAIL_FROM_NAME ?? "Tinkuy";
@@ -26,7 +38,7 @@ async function sendEmail(payload: EmailPayload): Promise<void> {
     return;
   }
 
-  const { error } = await resend.emails.send({
+  const { error } = await getResend().emails.send({
     from: `${FROM_NAME} <${FROM_EMAIL}>`,
     to: payload.to,
     subject: payload.subject,
