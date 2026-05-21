@@ -3,18 +3,25 @@ import bcrypt from 'bcryptjs';
 
 const prisma = new PrismaClient();
 
+// Set SEED_DEMO=true to also load sample categories, products, orders, etc.
+// Leave unset (or any other value) for a clean DB with only tenant + branch + admin.
+const seedDemo = process.env.SEED_DEMO === 'true';
+
 async function main() {
   console.log('🌱 Starting seed...');
 
   // ───────────────────────────────────────────
   // TENANT
+  // Slug and name are env-overridable; safe fallbacks preserve existing behaviour.
   // ───────────────────────────────────────────
+  const tenantSlug = process.env.TENANT_SLUG ?? 'tinkuy';
+  const tenantName = process.env.TENANT_NAME ?? 'Tinkuy Saludable';
   const tenant = await prisma.tenant.upsert({
-    where: { slug: 'tinkuy' },
+    where: { slug: tenantSlug },
     update: {},
     create: {
-      name: 'Tinkuy Saludable',
-      slug: 'tinkuy',
+      name: tenantName,
+      slug: tenantSlug,
       isActive: true,
     },
   });
@@ -36,6 +43,49 @@ async function main() {
     },
   });
   console.log('✅ Branch created:', branch.name);
+
+  // ───────────────────────────────────────────
+  // ADMIN USER
+  // Credentials are env-overridable so you can set ADMIN_EMAIL and ADMIN_PASSWORD
+  // in .env before running the seed. Fallback values are safe defaults for local
+  // development only — never rely on them in production.
+  // ───────────────────────────────────────────
+  const adminEmail = process.env.ADMIN_EMAIL ?? 'admin@tinkuy.com';
+  const adminPlainPassword = process.env.ADMIN_PASSWORD ?? 'Admin123!';
+  const adminPassword = await bcrypt.hash(adminPlainPassword, 12);
+  const admin = await prisma.adminUser.upsert({
+    where: { tenantId_email: { tenantId: tenant.id, email: adminEmail } },
+    // Authoritative update: re-seeding must reapply the env-driven password,
+    // role and active state. An empty `update: {}` would silently keep a stale
+    // password from a previous seed when the row already exists.
+    update: {
+      password: adminPassword,
+      role: 'admin',
+      isActive: true,
+    },
+    create: {
+      tenantId: tenant.id,
+      email: adminEmail,
+      password: adminPassword,
+      firstName: 'Administrador',
+      lastName: 'Tinkuy',
+      role: 'admin',
+      isActive: true,
+    },
+  });
+  console.log('✅ Admin created:', admin.email);
+
+  if (!seedDemo) {
+    console.log('\nℹ️  SEED_DEMO not set — skipped demo data (tenant + branch + admin only)');
+    console.log('\n🎉 Seed completed successfully!');
+    console.log('\nTest credentials:');
+    console.log(`  Admin: ${adminEmail} / (ADMIN_PASSWORD env var or default)`);
+    return;
+  }
+
+  // ───────────────────────────────────────────
+  // DEMO DATA — only when SEED_DEMO=true
+  // ───────────────────────────────────────────
 
   // ───────────────────────────────────────────
   // CATEGORIES (8 categories)
@@ -69,25 +119,6 @@ async function main() {
     categories[cat.slug] = category;
   }
   console.log('✅ Categories created:', Object.keys(categories).length);
-
-  // ───────────────────────────────────────────
-  // ADMIN USER
-  // ───────────────────────────────────────────
-  const adminPassword = await bcrypt.hash('Admin123!', 12);
-  const admin = await prisma.adminUser.upsert({
-    where: { tenantId_email: { tenantId: tenant.id, email: 'admin@tinkuy.com' } },
-    update: {},
-    create: {
-      tenantId: tenant.id,
-      email: 'admin@tinkuy.com',
-      password: adminPassword,
-      firstName: 'Administrador',
-      lastName: 'Tinkuy',
-      role: 'admin',
-      isActive: true,
-    },
-  });
-  console.log('✅ Admin created:', admin.email);
 
   // ───────────────────────────────────────────
   // CUSTOMERS (2 additional + 1 vendor)
@@ -536,11 +567,14 @@ async function main() {
   }
   console.log('✅ Newsletter subscribers created');
 
-  console.log('\n🎉 Seed completed successfully!');
+  console.log('\n🎉 Seed completed successfully! (with demo data)');
   console.log('\nTest credentials:');
-  console.log('  Admin:    admin@tinkuy.com / Admin123!');
+  console.log(`  Admin:    ${adminEmail} / (ADMIN_PASSWORD env var or default)`);
   console.log('  Vendor:   vendedor@tinkuy.com / Vendedor123!');
   console.log('  Customer: cliente@tinkuy.com / Cliente123!');
+
+  // suppress unused-variable warning for vendor
+  void vendor;
 }
 
 main()

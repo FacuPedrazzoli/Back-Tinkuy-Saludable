@@ -15,7 +15,7 @@ export async function listCategories(tenantId: string) {
   const categoriesWithCounts = await Promise.all(
     categories.map(async (cat) => {
       const productCount = await prisma.product.count({
-        where: { tenantId, isActive: true },
+        where: { tenantId, categoryId: cat.id, isActive: true },
       });
       return {
         ...cat,

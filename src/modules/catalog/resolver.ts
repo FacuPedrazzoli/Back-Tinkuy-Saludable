@@ -5,6 +5,33 @@ import { ValidationError, ForbiddenError } from "@lib/errors";
 import { rateLimitGeneral } from "@lib/rate-limit";
 import { encodeCursor, decodeCursor, PageInfo } from "@graphql/types/connection";
 import { prisma } from "@lib/prisma";
+import { InvoiceType, ProductSaleUnit } from "@prisma/client";
+import { Category } from "@modules/categories/resolver";
+
+// ─── Enum types ───
+
+const InvoiceTypeEnum = builder.enumType("InvoiceType", {
+  values: {
+    A: { value: "A" },
+    B: { value: "B" },
+    I: { value: "I" },
+    NONE: { value: "NONE" },
+  } as const,
+});
+
+const ProductSaleUnitEnum = builder.enumType("ProductSaleUnit", {
+  values: {
+    KG: { value: "KG" },
+    UNIT: { value: "UNIT" },
+  } as const,
+});
+
+const PriceUpdateModeEnum = builder.enumType("PriceUpdateMode", {
+  values: {
+    PERCENT_INCREASE: { value: "PERCENT_INCREASE" },
+    FIXED_PRICE: { value: "FIXED_PRICE" },
+  } as const,
+});
 
 // ─── Types ───
 
@@ -18,6 +45,41 @@ export const Product = builder.prismaObject("Product", {
     isActive: t.exposeBoolean("isActive"),
     isVisible: t.exposeBoolean("isVisible"),
     basePrice: t.field({ type: "Decimal", resolve: (product) => String(product.basePrice) }),
+    invoiceType: t.field({
+      type: InvoiceTypeEnum,
+      resolve: (product) => product.invoiceType,
+    }),
+    saleUnit: t.field({
+      type: ProductSaleUnitEnum,
+      resolve: (product) => product.saleUnit,
+    }),
+    // Computed client pricing fields (derived from basePrice — NOT stored)
+    clientKiloPrice: t.float({
+      resolve: (product) => Number(product.basePrice) * 1.4,
+    }),
+    clientPrice500g: t.float({
+      resolve: (product) => Number(product.basePrice) * 1.4 * 0.5,
+    }),
+    clientPrice250g: t.float({
+      resolve: (product) => Number(product.basePrice) * 1.4 * 0.3,
+    }),
+    clientPrice100g: t.float({
+      resolve: (product) => Number(product.basePrice) * 1.4 * 0.14,
+    }),
+    clientUnitPrice: t.float({
+      resolve: (product) => Number(product.basePrice) * 1.4,
+    }),
+    category: t.field({
+      type: Category,
+      nullable: true,
+      resolve: async (product) => {
+        if (!product.categoryId) return null;
+        const cat = await prisma.category.findUnique({ where: { id: product.categoryId } });
+        if (!cat) return null;
+        const productCount = await prisma.product.count({ where: { tenantId: cat.tenantId, categoryId: cat.id, isActive: true } });
+        return { ...cat, productCount };
+      },
+    }),
     createdAt: t.expose("createdAt", { type: "DateTime" }),
     updatedAt: t.expose("updatedAt", { type: "DateTime" }),
     variants: t.relation("variants"),
@@ -195,6 +257,69 @@ const CreateAttributeInput = builder.inputType("CreateAttributeInput", {
   }),
 });
 
+// ─── Bulk Import Types ───
+
+const BulkProductInput = builder.inputType("BulkProductInput", {
+  fields: (t) => ({
+    name: t.string({ required: true }),
+    category: t.string({ required: true }),
+    supplier: t.string(),
+    invoiceType: t.field({ type: InvoiceTypeEnum }),
+    saleUnit: t.field({ type: ProductSaleUnitEnum, required: true }),
+    basePrice: t.float({ required: true }),
+  }),
+});
+
+const BulkImportErrorRef = builder.objectRef<{
+  row: number;
+  name: string | null;
+  message: string;
+}>("BulkImportError").implement({
+  fields: (t) => ({
+    row: t.exposeInt("row"),
+    name: t.exposeString("name", { nullable: true }),
+    message: t.exposeString("message"),
+  }),
+});
+
+const BulkImportResultRef = builder.objectRef<{
+  created: number;
+  updated: number;
+  skipped: number;
+  errors: Array<{ row: number; name: string | null; message: string }>;
+}>("BulkImportResult").implement({
+  fields: (t) => ({
+    created: t.exposeInt("created"),
+    updated: t.exposeInt("updated"),
+    skipped: t.exposeInt("skipped"),
+    errors: t.field({
+      type: [BulkImportErrorRef],
+      resolve: (parent) => parent.errors,
+    }),
+  }),
+});
+
+const BulkPriceUpdateInput = builder.inputType("BulkPriceUpdateInput", {
+  fields: (t) => ({
+    productIds: t.stringList({ required: true }),
+    mode: t.field({ type: PriceUpdateModeEnum, required: true }),
+    value: t.float({ required: true }),
+  }),
+});
+
+const BulkPriceResultRef = builder.objectRef<{
+  updated: number;
+  errors: Array<{ row: number; name: string | null; message: string }>;
+}>("BulkPriceResult").implement({
+  fields: (t) => ({
+    updated: t.exposeInt("updated"),
+    errors: t.field({
+      type: [BulkImportErrorRef],
+      resolve: (parent) => parent.errors,
+    }),
+  }),
+});
+
 // ─── Connection Types ───
 
 const ProductEdge = builder.objectRef<{ node: unknown; cursor: string }>("ProductEdge").implement({
@@ -233,6 +358,8 @@ builder.queryField("products", (t) =>
     args: {
       search: t.arg.string(),
       tagSlug: t.arg.string(),
+      categoryId: t.arg.string(),
+      supplierId: t.arg.string(),
       isVisible: t.arg.boolean({ defaultValue: true }),
       first: t.arg.int(),
       after: t.arg.string(),
@@ -268,6 +395,18 @@ builder.queryField("products", (t) =>
         };
       }
 
+      if (args.categoryId) {
+        where.categoryId = args.categoryId;
+      }
+
+      if (args.supplierId) {
+        where.suppliers = {
+          some: {
+            supplierId: args.supplierId,
+          },
+        };
+      }
+
       if (cursor) {
         where.id = { gt: cursor };
       }
@@ -278,6 +417,7 @@ builder.queryField("products", (t) =>
           include: {
             images: { where: { productId: { not: null } }, take: 1, orderBy: { position: 'asc' } },
             tags: { include: { tag: true } },
+            category: true,
           },
           take: first + 1,
           skip: 0,
@@ -314,6 +454,19 @@ builder.queryField("product", (t) =>
     resolve: async (_parent, args, ctx) => {
       if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
       return catalogService.getProduct(args.id, ctx.tenantId, true);
+    },
+  })
+);
+
+builder.queryField("productBySlug", (t) =>
+  t.field({
+    type: Product,
+    nullable: true,
+    args: { slug: t.arg.string({ required: true }) },
+    authScopes: { public: true },
+    resolve: async (_parent, args, ctx) => {
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      return catalogService.getProductBySlug(args.slug, ctx.tenantId);
     },
   })
 );
@@ -527,6 +680,49 @@ builder.mutationField("createAttribute", (t) =>
         tenantId: ctx.tenantId,
         productId: input.productId ?? undefined,
         variantId: input.variantId ?? undefined,
+      });
+    },
+  })
+);
+
+builder.mutationField("bulkImportProducts", (t) =>
+  t.field({
+    type: BulkImportResultRef,
+    args: {
+      input: t.arg({ type: [BulkProductInput], required: true }),
+    },
+    authScopes: { admin: true },
+    resolve: async (_parent, { input }, ctx) => {
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      return catalogService.bulkImportProducts(
+        input.map((row) => ({
+          name: row.name,
+          category: row.category,
+          supplier: row.supplier ?? undefined,
+          invoiceType: (row.invoiceType ?? "NONE") as InvoiceType,
+          saleUnit: row.saleUnit as ProductSaleUnit,
+          basePrice: row.basePrice,
+        })),
+        ctx.tenantId
+      );
+    },
+  })
+);
+
+builder.mutationField("bulkUpdateProductPrices", (t) =>
+  t.field({
+    type: BulkPriceResultRef,
+    args: {
+      input: t.arg({ type: BulkPriceUpdateInput, required: true }),
+    },
+    authScopes: { admin: true },
+    resolve: async (_parent, { input }, ctx) => {
+      if (!ctx.tenantId) throw new ForbiddenError("Tenant ID required");
+      return catalogService.bulkUpdateProductPrices({
+        productIds: input.productIds,
+        mode: input.mode as "PERCENT_INCREASE" | "FIXED_PRICE",
+        value: input.value,
+        tenantId: ctx.tenantId,
       });
     },
   })

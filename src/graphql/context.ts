@@ -2,6 +2,7 @@ import type { Request } from "express";
 import DataLoader from "dataloader";
 import { verifyToken, type TokenPayload } from "@lib/jwt";
 import { getTenantId } from "@lib/tenant-context";
+import { resolveTenantId } from "@lib/tenant-resolve";
 import { logger } from "@lib/logger";
 import { getBatchStockCached, type BatchStockKey } from "@lib/cache";
 
@@ -63,7 +64,12 @@ export async function createContext({ req }: { req: Request }): Promise<Context>
   if (user) {
     tenantId = user.tenantId;
   } else {
-    tenantId = headerTenantId ?? getTenantId() ?? null;
+    const raw = headerTenantId ?? getTenantId() ?? null;
+    try {
+      tenantId = await resolveTenantId(raw ?? undefined);
+    } catch {
+      tenantId = null;
+    }
   }
 
   const stockLoader = new DataLoader<BatchStockKey, number | null, string>(

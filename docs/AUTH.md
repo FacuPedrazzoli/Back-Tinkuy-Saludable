@@ -160,8 +160,8 @@ interface CustomerTokenPayload {
 
 | Token Type | Secret Used | Expiration |
 |------------|-------------|------------|
-| Admin | `JWT_ADMIN_SECRET` | 24 hours |
-| Customer | `JWT_CUSTOMER_SECRET` | 7 days |
+| Admin | `JWT_ADMIN_SECRET` | 4 hours (see `src/lib/jwt.ts:45`) |
+| Customer | `JWT_CUSTOMER_SECRET` | 24 hours |
 
 ## JWT Verification Flow
 
@@ -365,7 +365,7 @@ prisma.$use(async (params, next) => {
 │   ▼                                                             │
 │   rateLimitAuth(`changepw:${userId}`)                           │
 │   │  - Uses auth rate limit config                             │
-│   │  - Default: 10 requests per 15 minutes                      │
+│   │  - Default: 5 requests per 15 minutes (see `src/lib/config.ts:34`)                      │
 │   │                                                             │
 │   ▼                                                             │
 │   Validate new password                                         │
@@ -403,13 +403,13 @@ mutation {
 | Config | Environment Variable | Default |
 |--------|---------------------|---------|
 | Auth window | `RATE_LIMIT_AUTH_WINDOW_MS` | 15 minutes (900000ms) |
-| Auth max requests | `RATE_LIMIT_AUTH_MAX_REQUESTS` | 10 |
+| Auth max requests | `RATE_LIMIT_AUTH_MAX_REQUESTS` | 5 (see `src/lib/config.ts:34`) |
 
 ```typescript
 // src/lib/config.ts
 auth: {
-  windowMs: parseIntOrDefault(process.env.RATE_LIMIT_AUTH_WINDOW_MS, 15 * 60 * 1000),
-  maxRequests: parseIntOrDefault(process.env.RATE_LIMIT_AUTH_MAX_REQUESTS, 10),
+  windowMs: Number(process.env.RATE_LIMIT_AUTH_WINDOW_MS || 900000),
+  maxRequests: Number(process.env.RATE_LIMIT_AUTH_MAX_REQUESTS || 5),
 },
 ```
 
@@ -419,7 +419,7 @@ auth: {
 
 | Purpose | Key Pattern | Default Limit |
 |---------|-------------|---------------|
-| Auth operations | `auth:{identifier}` | 10 per 15 min |
+| Auth operations | `auth:{identifier}` | 5 per 15 min |
 | Checkout | `checkout:{identifier}` | 10 per 1 min |
 | General | `general:{identifier}` | 100 per 1 min |
 

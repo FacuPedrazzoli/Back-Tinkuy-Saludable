@@ -1,7 +1,6 @@
-import { PrismaClient, Prisma } from '@prisma/client';
+import { Prisma, InvoiceType, ProductSaleUnit } from '@prisma/client';
 import { redis } from '@lib/redis';
-
-const prisma = new PrismaClient();
+import { prisma } from '@lib/prisma';
 
 const CACHE_TTL = 300;
 
@@ -582,4 +581,253 @@ export async function searchProducts(query: string, tenantId: string, first = 10
   return products;
 }
 
-export { redis, prisma };
+// ─── Slug helpers ───
+
+function slugify(text: string): string {
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+// ─── Bulk import ───
+
+interface BulkProductRow {
+  name: string;
+  category: string;
+  supplier?: string;
+  invoiceType: InvoiceType;
+  saleUnit: ProductSaleUnit;
+  basePrice: number;
+}
+
+interface BulkImportError {
+  row: number;
+  name: string | null;
+  message: string;
+}
+
+interface BulkImportResult {
+  created: number;
+  updated: number;
+  skipped: number;
+  errors: BulkImportError[];
+}
+
+export async function bulkImportProducts(
+  rows: BulkProductRow[],
+  tenantId: string
+): Promise<BulkImportResult> {
+  let created = 0;
+  let updated = 0;
+  let skipped = 0;
+  const errors: BulkImportError[] = [];
+
+  // Cache of category name → id (created if not existing)
+  const categoryCache = new Map<string, string>();
+  // Cache of supplier name → id
+  const supplierCache = new Map<string, string>();
+
+  async function getOrCreateCategory(name: string): Promise<string> {
+    const key = name.trim().toLowerCase();
+    if (categoryCache.has(key)) return categoryCache.get(key)!;
+
+    const slug = slugify(name);
+    const existing = await prisma.category.findFirst({
+      where: { tenantId, slug },
+    });
+
+    if (existing) {
+      categoryCache.set(key, existing.id);
+      return existing.id;
+    }
+
+    // Try by name (case insensitive)
+    const existingByName = await prisma.category.findFirst({
+      where: { tenantId, name: { equals: name.trim(), mode: "insensitive" } },
+    });
+
+    if (existingByName) {
+      categoryCache.set(key, existingByName.id);
+      return existingByName.id;
+    }
+
+    const created = await prisma.category.create({
+      data: { tenantId, name: name.trim(), slug },
+    });
+    categoryCache.set(key, created.id);
+    return created.id;
+  }
+
+  async function getOrCreateSupplier(name: string): Promise<string> {
+    const key = name.trim().toLowerCase();
+    if (supplierCache.has(key)) return supplierCache.get(key)!;
+
+    const existing = await prisma.supplier.findFirst({
+      where: { tenantId, name: { equals: name.trim(), mode: "insensitive" } },
+    });
+
+    if (existing) {
+      supplierCache.set(key, existing.id);
+      return existing.id;
+    }
+
+    const sup = await prisma.supplier.create({
+      data: { tenantId, name: name.trim() },
+    });
+    supplierCache.set(key, sup.id);
+    return sup.id;
+  }
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const rowNum = i + 1;
+
+    // Validate
+    if (!row.name || !row.name.trim()) {
+      errors.push({ row: rowNum, name: null, message: "Product name is required" });
+      skipped++;
+      continue;
+    }
+
+    if (!row.basePrice || row.basePrice <= 0) {
+      errors.push({ row: rowNum, name: row.name, message: "basePrice must be a positive number" });
+      skipped++;
+      continue;
+    }
+
+    if (!Object.values(InvoiceType).includes(row.invoiceType)) {
+      errors.push({ row: rowNum, name: row.name, message: `Invalid invoiceType: ${row.invoiceType}` });
+      skipped++;
+      continue;
+    }
+
+    if (!Object.values(ProductSaleUnit).includes(row.saleUnit)) {
+      errors.push({ row: rowNum, name: row.name, message: `Invalid saleUnit: ${row.saleUnit}` });
+      skipped++;
+      continue;
+    }
+
+    try {
+      const categoryId = await getOrCreateCategory(row.category);
+
+      let supplierId: string | undefined;
+      if (row.supplier) {
+        supplierId = await getOrCreateSupplier(row.supplier);
+      }
+
+      // Upsert by (tenantId, name)
+      const existing = await prisma.product.findFirst({
+        where: { tenantId, name: row.name.trim() },
+      });
+
+      if (existing) {
+        await prisma.product.update({
+          where: { id: existing.id },
+          data: {
+            basePrice: row.basePrice,
+            categoryId,
+            invoiceType: row.invoiceType,
+            saleUnit: row.saleUnit,
+          },
+        });
+
+        if (supplierId) {
+          await prisma.productSupplier.upsert({
+            where: { productId_supplierId: { productId: existing.id, supplierId } },
+            update: {},
+            create: { productId: existing.id, supplierId },
+          });
+        }
+        updated++;
+      } else {
+        const slug = `${slugify(row.name.trim())}-${Date.now()}-${i}`;
+        const newProduct = await prisma.product.create({
+          data: {
+            tenantId,
+            name: row.name.trim(),
+            slug,
+            basePrice: row.basePrice,
+            categoryId,
+            invoiceType: row.invoiceType,
+            saleUnit: row.saleUnit,
+          },
+        });
+
+        if (supplierId) {
+          await prisma.productSupplier.create({
+            data: { productId: newProduct.id, supplierId },
+          });
+        }
+        created++;
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      errors.push({ row: rowNum, name: row.name, message });
+      skipped++;
+    }
+  }
+
+  return { created, updated, skipped, errors };
+}
+
+// ─── Bulk price update ───
+
+interface BulkPriceUpdateArgs {
+  productIds: string[];
+  mode: "PERCENT_INCREASE" | "FIXED_PRICE";
+  value: number;
+  tenantId: string;
+}
+
+interface BulkPriceResult {
+  updated: number;
+  errors: BulkImportError[];
+}
+
+export async function bulkUpdateProductPrices(args: BulkPriceUpdateArgs): Promise<BulkPriceResult> {
+  let updatedCount = 0;
+  const errors: BulkImportError[] = [];
+
+  for (let i = 0; i < args.productIds.length; i++) {
+    const productId = args.productIds[i];
+    try {
+      const product = await prisma.product.findFirst({
+        where: { id: productId, tenantId: args.tenantId },
+        select: { id: true, basePrice: true },
+      });
+
+      if (!product) {
+        errors.push({ row: i + 1, name: productId, message: `Product not found: ${productId}` });
+        continue;
+      }
+
+      let newBase: number;
+      if (args.mode === "PERCENT_INCREASE") {
+        newBase = Number(product.basePrice) * (1 + args.value / 100);
+      } else {
+        newBase = args.value;
+      }
+
+      if (newBase <= 0) {
+        errors.push({ row: i + 1, name: productId, message: "Resulting price must be positive" });
+        continue;
+      }
+
+      await prisma.product.update({
+        where: { id: productId },
+        data: { basePrice: newBase },
+      });
+      updatedCount++;
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      errors.push({ row: i + 1, name: productId, message });
+    }
+  }
+
+  return { updated: updatedCount, errors };
+}
+
+export { redis };

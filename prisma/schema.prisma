@@ -227,6 +227,8 @@ model Product {
   isVisible   Boolean  @default(true)
   isFeatured  Boolean  @default(false)
   basePrice   Decimal  @default(0) @db.Decimal(12, 2)
+  invoiceType InvoiceType @default(NONE)
+  saleUnit    ProductSaleUnit @default(UNIT)
   compareAtPrice Decimal? @db.Decimal(12, 2)
   costPrice   Decimal? @db.Decimal(12, 2)
   weight      Decimal? @db.Decimal(10, 2)
@@ -684,8 +686,13 @@ model WebhookEvent {
 enum InvoiceType {
   A
   B
-  C
-  MIXTA
+  I
+  NONE
+}
+
+enum ProductSaleUnit {
+  KG
+  UNIT
 }
 
 model Invoice {

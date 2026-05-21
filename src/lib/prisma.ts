@@ -16,6 +16,10 @@ const TENANT_MODELS = [
   "Supplier",
   "StockMovement",
   "Order",
+  "Category",
+  "Coupon",
+  "ShippingRate",
+  "AuditLog",
 ];
 
 function isTenantModel(model: string): boolean {

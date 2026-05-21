@@ -21,6 +21,29 @@ export const Order = builder.prismaObject("Order", {
     branch: t.relation("branch"),
     customer: t.relation("customer", { nullable: true }),
     items: t.relation("items"),
+    orderNumber: t.field({
+      type: "String",
+      resolve: (order) => `#${order.id.slice(0, 8).toUpperCase()}`,
+    }),
+    customerName: t.field({
+      type: "String",
+      nullable: true,
+      resolve: async (order, _args, _ctx) => {
+        const customer = (order as any).customer as { firstName: string; lastName: string } | null | undefined;
+        if (customer?.firstName) {
+          return `${customer.firstName} ${customer.lastName ?? ""}`.trim();
+        }
+        return null;
+      },
+    }),
+    customerEmail: t.field({
+      type: "String",
+      nullable: true,
+      resolve: async (order, _args, _ctx) => {
+        const customer = (order as any).customer as { email: string } | null | undefined;
+        return customer?.email ?? (order as any).guestEmail ?? null;
+      },
+    }),
   }),
 });
 

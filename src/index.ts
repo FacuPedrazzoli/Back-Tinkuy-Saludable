@@ -16,7 +16,8 @@ import { prisma } from "@lib/prisma";
 import { redis, pingRedis } from "@lib/redis";
 import { rateLimitGeneral } from "@lib/rate-limit";
 import { handleWebhook } from "@modules/checkout/webhook.handler";
-import { runWithTenantSync } from "@lib/tenant-context";
+import { runWithTenant } from "@lib/tenant-context";
+import { resolveTenantId } from "@lib/tenant-resolve";
 import { validateSecrets, validatedAdminSecret, validatedCustomerSecret } from "@lib/jwt";
 import { validateConfig } from "@lib/config";
 import jwt from "jsonwebtoken";
@@ -95,8 +96,17 @@ app.use((req, res, next) => {
 
 app.use(sentryHandlers.errorHandler());
 
-app.use((req, _res, next) => {
-  let tenantId: string | null = null;
+// IMPORTANT: Two places populate tenant context per-request:
+//   1. This ALS middleware (below) — populates AsyncLocalStorage for the
+//      Prisma multi-tenant middleware ($use) which reads ALS on every query.
+//   2. src/graphql/context.ts createContext() — resolves ctx.tenantId for
+//      resolvers that need it explicitly.
+// Both MUST use resolveTenantId() so they hold the canonical UUID, never a
+// raw slug. If only context.ts resolves and index.ts stores the slug, the
+// Prisma $use middleware injects `where: { tenantId: "<slug>" }` on every
+// tenant-model query and returns 0 rows.
+app.use(async (req, _res, next) => {
+  let rawTenantId: string | null = null;
 
   const auth = req.headers.authorization;
   if (auth) {
@@ -117,24 +127,31 @@ app.use((req, _res, next) => {
           }
         }
         if (decoded?.tenantId && typeof decoded.tenantId === "string" && decoded.tenantId.length > 0 && decoded.tenantId.length <= 64) {
-          tenantId = decoded.tenantId;
+          rawTenantId = decoded.tenantId;
         }
       } catch {
-        // Token inválido, no establecer tenantId
+        // invalid token — no tenant from auth header
       }
     }
   }
 
-  if (!tenantId) {
+  if (!rawTenantId) {
     const headerTenantId = req.headers["x-tenant-id"] as string | undefined;
     if (headerTenantId && typeof headerTenantId === "string" && headerTenantId.length > 0 && headerTenantId.length <= 64) {
-      tenantId = headerTenantId;
+      rawTenantId = headerTenantId;
     }
   }
 
-  if (tenantId) {
-    runWithTenantSync(tenantId, next);
-  } else {
+  // Always resolve to UUID before storing in ALS. resolveTenantId() handles:
+  //   - UUID passthrough (exact-id match)
+  //   - slug → UUID lookup
+  //   - single-tenant fallback (only when exactly 1 active tenant exists)
+  // If resolution fails (unknown tenant, ambiguous multi-tenant), we skip ALS
+  // and let resolvers handle the null case themselves.
+  try {
+    const resolvedId = await resolveTenantId(rawTenantId ?? undefined);
+    await runWithTenant(resolvedId, () => Promise.resolve(next()));
+  } catch {
     next();
   }
 });
